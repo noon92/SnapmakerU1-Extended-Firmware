@@ -38,7 +38,7 @@ SNAPSHOT_HOST = os.environ.get("NOTIFICATIONS_SNAPSHOT_HOST", "http://127.0.0.1"
 SECTION = "notifications"
 COMPONENT = "push_notifications"
 REMOTE_METHOD = "push_notification"
-LIFT_MM = 10
+LIFT_MM = 15
 # The stock PRINT_END / CANCEL_PRINT macros raise Z by +5 mm (relative,
 # computed before our hook runs) below this height, so the lift must keep
 # Z + lift <= LIFT_CEILING to stay inside the stock macros' range.
@@ -745,7 +745,7 @@ def render_moonraker(s):
 
 def klipper_lift():
     return f"""[gcode_macro _NTFY_LIFT]
-description: Lift up to {LIFT_MM} mm before a notification snapshot
+description: Lift up to {LIFT_MM} mm, then report once the lift is done
 gcode:
     {{% set th = printer.toolhead %}}
     {{% set z = printer.gcode_move.gcode_position.z %}}
@@ -758,8 +758,11 @@ gcode:
     {{% endif %}}
     G1 Z{{lift}} F600
     RESTORE_GCODE_STATE NAME=ntfy_lift
-    M400
     {{% endif %}}
+    {{# Klipper reads G-code ahead of the motion: wait until the toolhead
+        is really up, so the snapshot isn't taken with the nozzle on the
+        part #}}
+    M400
 
 [gcode_macro _NTFY_SEND]
 description: Report a print hook event to the push_notifications component
@@ -768,9 +771,11 @@ gcode:
 
 
 def render_klipper(s):
-    """Print-end and cancel hooks. They run before the stock macros park the
-    toolhead: lift (only if homed, and only as far as the stock macros allow)
-    and report, so the snapshot shows the part. A hook must never fail, or
+    """Print-end and cancel hooks. They run before the stock macros: lift
+    (only if homed, and only as far as the stock macros allow) and report,
+    so the snapshot shows the part. There is no hold: the stock macro's own
+    rise carries on while the snapshot is taken, so the nozzle doesn't sit
+    over the part and ooze onto it. A hook must never fail, or
     the stock macro (heaters off, motors off) would not run."""
     if not configured(s):
         return None
@@ -789,7 +794,6 @@ gcode:
     {{% if printer.print_stats.state == "printing" %}}
     {"_NTFY_LIFT" if lift else ""}
     _NTFY_SEND EVENT=complete
-    {"G4 P1500" if lift else ""}
     {{% endif %}}""")
 
     fault_rid = "error" if "error" in rows else (
@@ -808,9 +812,6 @@ gcode:
     _NTFY_LIFT
     {{% endif %}}
     _NTFY_SEND EVENT=cancelled
-    {{% if lift %}}
-    G4 P1500
-    {{% endif %}}
     {{% endif %}}""")
 
     if not parts:

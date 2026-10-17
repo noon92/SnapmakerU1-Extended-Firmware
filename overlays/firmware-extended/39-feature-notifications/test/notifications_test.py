@@ -560,7 +560,10 @@ def run_config_tests():
           "[gcode_macro _PRINT_END_NTFY]" in klip
           and "[gcode_macro _CANCEL_PRINT_NTFY]" in klip)
     check("lift only when homed, capped below the stock moves",
-          '"z" in th.homed_axes' in klip and "[10, 265 - z]|min" in klip)
+          '"z" in th.homed_axes' in klip and "[15, 265 - z]|min" in klip)
+    check("reports once lifted, with no hold over the part",
+          "G4" not in klip and klip.index("M400") < klip.index(
+              "[gcode_macro _NTFY_SEND]"))
     check("hooks only act during a print job",
           'printer.print_stats.state == "printing"' in klip
           and 'ps.state in ["printing", "paused"]' in klip)

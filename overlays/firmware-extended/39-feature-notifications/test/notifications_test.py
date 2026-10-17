@@ -490,11 +490,24 @@ async def test_no_secrets_in_logs():
     check("without the webhook or bot token", token not in logged, logged)
 
 
+async def test_config_lines():
+    print("Config lines the component reads")
+    reset_world()
+    c = pn.PushNotifications(Config(Server(), dict(
+        name="U1", complete="snapshot, ntfys://ntfy.example.com/u1",
+        complete_email="snapshot, mailtos://u:p@smtp.example.com:587?"
+                       "from=a@example.com&to=b@example.com",
+        complete_webhook="snapshot, jsons://hooks.example.com/x?:event=complete")))
+    channels = [d.channel for d in c.rows["complete"][1]]
+    check("push, email and webhook for one notification",
+          channels == ["ntfy", "email", "webhook"], channels)
+
+
 async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_no_secrets_in_logs):
+              test_no_secrets_in_logs, test_config_lines):
         try:
             await t()
         except Exception as e:  # report and carry on
@@ -568,6 +581,33 @@ def run_config_tests():
             "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abc")
     d = nc.validate(dict(enabled=True, provider="discord", secret=hook,
                          discord_mention="everyone"), nc.load())
+    w = nc.validate(dict(enabled=True, provider="ntfy",
+                         server="https://ntfy.example.com", topic="u1",
+                         webhook_enabled=True,
+                         webhook_url="https://u:p@hooks.example.com/x/abc?k=1",
+                         printer_url="http://u1"), nc.load())
+    w["rows"]["progress_25"]["enabled"] = False
+    wmoon = nc.render_moonraker(w)
+    wurl = nc.webhook_url(w, "complete", True)
+    check("webhook: JSON sender, own query kept, event, printer, links",
+          wurl.startswith("jsons://u:p@hooks.example.com/x/abc?")
+          and "-k=1" in wurl and ":event=complete" in wurl
+          and ":printer=U1" in wurl and ":web_ui=http%3A%2F%2Fu1%2F" in wurl,
+          wurl)
+    check("webhook is added alongside the push service",
+          "\ncomplete: snapshot, ntfys://" in wmoon
+          and "\ncomplete_webhook: snapshot, jsons://" in wmoon)
+    check("webhook gets notifications that push and email don't",
+          "progress_25_webhook:" in wmoon and "\nprogress_25:" not in wmoon)
+    hook_only = nc.validate(dict(enabled=True, provider="none",
+                                 webhook_enabled=True,
+                                 webhook_url="http://hooks.local/x"),
+                            nc.load())
+    check("a webhook alone is enough (print hooks generated)",
+          nc.configured(hook_only) and nc.render_klipper(hook_only))
+    bad(dict(provider="none", webhook_enabled=True,
+             webhook_url="ftp://example.com/x"),
+        "rejects a webhook that isn't http(s)")
     check("Discord: mention only on high/max",
           "ping=everyone" in nc.row_url(d, "error", "max", True)
           and "ping" not in nc.row_url(d, "complete", "default", True))

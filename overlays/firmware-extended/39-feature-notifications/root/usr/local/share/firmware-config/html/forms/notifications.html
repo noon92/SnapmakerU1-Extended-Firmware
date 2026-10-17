@@ -231,6 +231,19 @@
             </div>
         </div>
 
+        <div class="nt-section">Webhook</div>
+        <label class="nt-enable nt-sub"><input type="checkbox" id="nt-wh-enabled"> Send every notification to a webhook</label>
+        <div class="nt-grid" id="nt-webhook">
+            <div class="nt-field">
+                <label for="nt-wh-url">Webhook URL</label>
+                <div class="nt-secret">
+                    <input class="nt-input" id="nt-wh-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="https://example.com/hook">
+                    <button type="button" class="btn btn-secondary" data-toggle="nt-wh-url">Show</button>
+                </div>
+                <div class="nt-hint">For Home Assistant, Node-RED, n8n or your own scripts. Each notification is POSTed as JSON: <code>title</code>, <code>message</code>, <code>type</code> (info, success, warning, failure), <code>event</code> (e.g. complete), <code>printer</code>, the links, and the image in <code>attachments</code> (base64). It gets every notification, whatever the Push and Email columns say: use <code>event</code> to pick.</div>
+            </div>
+        </div>
+
         <div class="nt-section">Notification content</div>
         <div class="nt-grid">
             <div class="nt-field">
@@ -516,6 +529,13 @@
             el('nt-camera').value = data.camera;
             el('nt-printer-url').value = data.printer_url;
             el('nt-email-enabled').checked = data.email_enabled;
+            el('nt-wh-enabled').checked = !!data.webhook_enabled;
+            el('nt-wh-url').placeholder = data.has_webhook_url ? 'Saved (leave empty to keep)' : 'https://example.com/hook';
+            const updateWebhook = () => {
+                el('nt-webhook').style.display = el('nt-wh-enabled').checked ? '' : 'none';
+            };
+            el('nt-wh-enabled').onchange = updateWebhook;
+            updateWebhook();
             el('nt-fl-percent').value = data.filament_low_percent;
             el('nt-fl-grams').value = data.filament_low_grams;
             el('nt-filament').style.display = data.meta.spoolman ? '' : 'none';
@@ -603,8 +623,13 @@
             const provider = el('nt-provider').value;
             const emailEnabled = el('nt-email-enabled').checked;
             const emailPassword = el('nt-email-password').value;
-            if (enabled && provider === 'none' && !emailEnabled) {
-                throw new Error('Choose a push service, or enable email.');
+            const webhookEnabled = el('nt-wh-enabled').checked;
+            const webhookUrl = el('nt-wh-url').value.trim();
+            if (enabled && provider === 'none' && !emailEnabled && !webhookEnabled) {
+                throw new Error('Choose a push service, or enable email or a webhook.');
+            }
+            if (webhookEnabled && !webhookUrl && !state.has_webhook_url) {
+                throw new Error('Enter the webhook URL.');
             }
             if (emailEnabled) {
                 if (!el('nt-email-host').value.trim()) throw new Error('Enter the SMTP server.');
@@ -675,12 +700,14 @@
                 email_username: el('nt-email-username').value.trim(),
                 email_from: el('nt-email-from').value.trim(),
                 email_to: el('nt-email-to').value.trim(),
+                webhook_enabled: webhookEnabled,
                 // The printer's clock is UTC: ETAs are shown in this browser's time zone
                 timezone: (Intl.DateTimeFormat().resolvedOptions().timeZone || '').replace(/[^A-Za-z0-9_+\-\/]/g, ''),
                 rows
             };
             if (secret) payload.secret = secret;
             if (emailPassword) payload.email_password = emailPassword;
+            if (webhookUrl) payload.webhook_url = webhookUrl;
             return payload;
         }
     };

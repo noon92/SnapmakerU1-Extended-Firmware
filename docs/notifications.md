@@ -6,9 +6,9 @@ title: Push Notifications
 
 Print, progress and error notifications with camera snapshots, sent to your
 phone through [ntfy](https://ntfy.sh) (the public `ntfy.sh` server or your own),
-[Pushover](https://pushover.net), [Telegram](https://telegram.org) or
+[Pushover](https://pushover.net), [Telegram](https://telegram.org),
 [Discord](https://discord.com), and/or by email (Gmail, Brevo or any SMTP
-server).
+server), and/or to a webhook for home automation.
 
 ![Notifications settings](screenshots/notifications.png)
 
@@ -141,6 +141,34 @@ also be entered by hand: a number, `-100...` for a group or channel, or
 
 The image comes with the text under it. Messages longer than Telegram's
 1024-character caption limit arrive as the image followed by the text.
+
+### Webhook
+
+A webhook can be added alongside the push service and email, for Home
+Assistant, Node-RED, n8n or your own scripts. Check **Send every
+notification to a webhook** and paste the URL. It gets every notification,
+whatever the Push and Email columns say (the receiver picks by `event`),
+each as an HTTP POST with a JSON body:
+
+```json
+{
+  "version": "1.0",
+  "title": "✅ U1 complete",
+  "message": "Benchy\nPrint time: 1h 12m",
+  "type": "success",
+  "event": "complete",
+  "printer": "U1",
+  "web_ui": "http://u1/",
+  "live_camera": "http://u1/webcam/webrtc",
+  "attachments": [{"filename": "snapshot.jpg", "mimetype": "image/jpeg", "base64": "..."}]
+}
+```
+
+`type` is `info`, `success`, `warning` or `failure`; `event` is the
+notification (`started`, `first_layer`, `progress_25`, `paused`, `complete`,
+`error`, `filament_low`, ...; `test` for Send Test). The links appear when a
+printer URL is set, and `error_index` on faults. The URL's own query
+parameters and a `user:password@` login are kept. Priority isn't sent.
 
 ### Discord
 
@@ -310,6 +338,8 @@ email_username: you@gmail.com
 email_password: abcd efgh ijkl mnop
 email_from: you@gmail.com
 email_to: you@gmail.com
+webhook_enabled: false
+webhook_url:
 # <notification>: on|off (push), <priority>, image|no_image, email|no_email
 started: on, default, image, no_email
 paused: on, default, image, no_email

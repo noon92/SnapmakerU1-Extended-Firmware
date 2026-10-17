@@ -47,8 +47,9 @@ errors by push and email. By default, faults and power loss are also emailed.
   (e.g. `Possible Spaghetti Defect Detected`), and an **Error Index** link to the
   [U1 error code reference](https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/u1_error_codes).
 - **Snapshots before parking**: For *Print complete* and *Cancelled*, the
-  nozzle lifts up to 10 mm and the snapshot is taken before the printer parks
-  and the bed lowers, so the image shows the part. There is no lift if Z is
+  snapshot is taken once the nozzle has lifted 15 mm off the part, while the
+  printer's own end/cancel moves carry on, so the image shows the part and the
+  nozzle doesn't stop over it and ooze onto it. There is no lift if Z is
   not homed, and the lift is reduced near the top of the build volume so the
   stock end/cancel moves stay in range. For *Paused*, the snapshot is taken
   3 seconds after the pause starts, once the nozzle has moved off the part.

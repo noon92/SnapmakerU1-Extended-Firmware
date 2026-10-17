@@ -1023,7 +1023,8 @@ class PushNotifications:
         row = self.rows.get(rid)
         if row is None:
             return
-        # Grab the snapshot right away, while the hook holds the toolhead
+        # Grab the snapshot right away: the hook reports once the toolhead
+        # has lifted, and the stock macro keeps raising it from there
         snapshot = await self._fetch_snapshot() if row[0] == "snapshot" \
             else None
         await self._send(rid, title, body, snapshot=snapshot,

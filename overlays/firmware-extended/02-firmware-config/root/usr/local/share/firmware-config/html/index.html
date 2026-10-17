@@ -92,7 +92,9 @@
         @media (max-width: 600px) {
             body { padding: 12px; }
             .modal { padding: 16px; max-width: 96vw; }
-            .modal-buttons { flex-wrap: wrap; }
+            .modal-buttons { flex-wrap: wrap; gap: 8px; }
+            /* Keep a modal's buttons on one line where they fit */
+            .modal-buttons .btn { padding: 10px 14px; font-size: 13px; white-space: nowrap; }
         }
     </style>
 </head>

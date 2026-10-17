@@ -49,11 +49,13 @@
     @media (max-width: 600px) {
         .nt-grid { grid-template-columns: 1fr; }
         .nt-table { min-width: 0; font-size: 13px; }
-        .nt-table td { padding: 8px 6px; }
-        .nt-table th { padding: 0 6px 2px; }
-        .nt-table th.nt-c, .nt-table td.nt-c { width: 36px; }
-        .nt-table th.nt-img, .nt-table td.nt-img { width: 44px; }
-        .nt-table select.nt-input { width: 88px; padding: 5px 4px; font-size: 12px; }
+        .nt-table td { padding: 8px 4px; }
+        .nt-table td:first-child { padding-left: 8px; }
+        .nt-table th { padding: 0 4px 2px; font-size: 10px; letter-spacing: 0; }
+        .nt-table th.nt-c, .nt-table td.nt-c { width: 30px; }
+        .nt-table th.nt-img, .nt-table td.nt-img { width: 36px; }
+        /* Just wide enough for "Default" */
+        .nt-table select.nt-input { width: auto; padding: 5px 2px; font-size: 12px; }
         .nt-icon { width: 20px; }
     }
 </style>
@@ -158,10 +160,10 @@
             <div class="nt-field">
                 <label for="nt-topic">Topic</label>
                 <div class="nt-inline">
-                    <input class="nt-input" id="nt-topic" placeholder="u1" autocomplete="off" spellcheck="false">
+                    <input class="nt-input" id="nt-topic" placeholder="u1" maxlength="64" autocomplete="off" spellcheck="false">
                     <button type="button" class="btn btn-secondary" id="nt-topic-random" title="Generate a long random topic">Random</button>
                 </div>
-                <div class="nt-hint">Letters, digits, - and _. Subscribe to the same topic in the ntfy app.</div>
+                <div class="nt-hint">Subscribe to the same topic in the ntfy app.</div>
             </div>
             <div class="nt-field">
                 <label for="nt-auth">Authentication</label>
@@ -240,7 +242,11 @@
                     <input class="nt-input" id="nt-wh-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="https://example.com/hook">
                     <button type="button" class="btn btn-secondary" data-toggle="nt-wh-url">Show</button>
                 </div>
-                <div class="nt-hint">For Home Assistant, Node-RED, n8n or your own scripts. Each notification is POSTed as JSON: <code>title</code>, <code>message</code>, <code>type</code> (info, success, warning, failure), <code>event</code> (e.g. complete), <code>printer</code>, the links, and the image in <code>attachments</code> (base64). It gets every notification, whatever the Push and Email columns say: use <code>event</code> to pick.</div>
+                <div class="nt-hint">For Home Assistant, Node-RED, n8n or your own scripts. It gets every notification, whatever the Push and Email columns say.</div>
+            </div>
+            <div class="nt-field">
+                <label>What is sent</label>
+                <div class="nt-hint" style="margin-top:0">Each notification is POSTed as JSON: <code>title</code>, <code>message</code>, <code>type</code> (info, success, warning, failure), <code>event</code> (e.g. complete; use it to pick), <code>printer</code>, the links, and the image in <code>attachments</code> (base64).</div>
             </div>
         </div>
 
@@ -605,6 +611,16 @@
             };
             updatePrinterUrl();
             el('nt-server').oninput = updatePublicWarning;
+            // ntfy topics: letters, digits, - and _ only; anything else
+            // (typed or pasted) is dropped as it's entered
+            el('nt-topic').oninput = () => {
+                const t = el('nt-topic'), clean = t.value.replace(/[^A-Za-z0-9_-]/g, '');
+                if (clean !== t.value) {
+                    const at = t.selectionStart - (t.value.length - clean.length);
+                    t.value = clean;
+                    t.setSelectionRange(Math.max(0, at), Math.max(0, at));
+                }
+            };
             el('nt-topic-random').onclick = () => { el('nt-topic').value = randomTopic(); };
             el('nt-camera').onchange = updateCamera;
             el('nt-enabled').onchange = updateEnabled;

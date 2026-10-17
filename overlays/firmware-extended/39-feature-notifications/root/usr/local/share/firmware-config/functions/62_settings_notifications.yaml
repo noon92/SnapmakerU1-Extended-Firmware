@@ -7,7 +7,7 @@ settings:
     items:
       notifications:
         label: Push Notifications
-        description: Print, progress and error notifications with camera snapshots, via ntfy, Pushover, Telegram, Discord or email.
+        description: Print, progress and error notifications with camera snapshots, via ntfy, Pushover, Telegram, Discord, email or a webhook.
         help_url: http://snapmakeru1-extended-firmware.pages.dev/notifications
         form:
           html: forms/notifications.html

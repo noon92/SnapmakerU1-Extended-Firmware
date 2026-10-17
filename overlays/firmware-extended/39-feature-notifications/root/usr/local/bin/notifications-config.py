@@ -3,7 +3,7 @@
 # SPDX-PackageHomePage: https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware
 # SPDX-FileCopyrightText: Copyright (c) 2026 @noon92
 
-# Push notifications (ntfy, Pushover, Telegram or Discord) and email notifications (SMTP)
+# Push notifications (ntfy, Pushover, Telegram or Discord), email and a webhook notifications (SMTP)
 # configuration.
 #
 # `[notifications]` in extended2.cfg is the single source of truth. This tool:
@@ -121,6 +121,7 @@ RX_DISCORD_TOKEN = re.compile(r"[A-Za-z0-9_\-]{20,40}\.[A-Za-z0-9_\-]{4,10}"
                               r"\.[A-Za-z0-9_\-]{20,60}")
 RX_DISCORD_ID = re.compile(r"\d{5,25}")
 RX_DISCORD_MENTION = re.compile(r"|\d{5,25}|role:\d{5,25}|everyone|here")
+RX_WEBHOOK = re.compile(r"https?://[^\s]{3,2000}")
 RX_PRINTER_URL = re.compile(r"https?://[A-Za-z0-9.\-\[\]:]+(/[^\s]*)?")
 RX_NAME = re.compile(r"[A-Za-z0-9 _.()\-]{1,32}")
 RX_TIMEZONE = re.compile(r"[A-Za-z0-9_+\-/]{0,64}")
@@ -137,7 +138,7 @@ STRING_FIELDS = ("provider", "server", "topic", "auth", "username",
                  "camera", "name", "timezone", "email_host",
                  "email_security", "email_username", "email_from",
                  "email_to")
-SECRET_FIELDS = ("secret", "email_password")
+SECRET_FIELDS = ("secret", "email_password", "webhook_url")
 # Settings the form fills in for common providers
 EMAIL_PRESETS = {
     "gmail": {"label": "Gmail", "host": "smtp.gmail.com", "port": 587,
@@ -175,6 +176,8 @@ def defaults():
         "filament_low_percent": 10,
         "filament_low_grams": 50,
         "email_enabled": False,
+        "webhook_enabled": False,
+        "webhook_url": "",
         "email_host": "",
         "email_port": 587,
         "email_security": "starttls",
@@ -206,6 +209,8 @@ def load():
     s["enabled"] = sec.get("enabled", "false").strip().lower() == "true"
     s["email_enabled"] = \
         sec.get("email_enabled", "false").strip().lower() == "true"
+    s["webhook_enabled"] = \
+        sec.get("webhook_enabled", "false").strip().lower() == "true"
     for key in STRING_FIELDS + SECRET_FIELDS:
         if key in sec:
             s[key] = sec.get(key).strip()
@@ -278,6 +283,8 @@ def section_lines(s):
         f"email_password: {s['email_password']}",
         f"email_from: {s['email_from']}",
         f"email_to: {s['email_to']}",
+        f"webhook_enabled: {'true' if s['webhook_enabled'] else 'false'}",
+        f"webhook_url: {s['webhook_url']}",
         "# <notification>: on|off (push), <priority>, image|no_image, "
         "email|no_email",
     ]
@@ -327,6 +334,8 @@ def validate(data, current):
         s["enabled"] = bool(data["enabled"])
     if "email_enabled" in data:
         s["email_enabled"] = bool(data["email_enabled"])
+    if "webhook_enabled" in data:
+        s["webhook_enabled"] = bool(data["webhook_enabled"])
     for key in STRING_FIELDS:
         if key in data:
             s[key] = str(data[key] or "").strip()
@@ -390,7 +399,13 @@ def validate(data, current):
         raise ConfigError("Printer URL must look like http://100.64.0.1")
 
     validate_email(s)
-    if s["enabled"] and s["provider"] == "none" and not s["email_enabled"]:
+    if s["webhook_enabled"] and (
+            not RX_WEBHOOK.fullmatch(s["webhook_url"])
+            or not urlparse(s["webhook_url"]).hostname):
+        raise ConfigError("Webhook URL must look like "
+                          "https://example.com/hook")
+    if s["enabled"] and s["provider"] == "none" and \
+            not s["email_enabled"] and not s["webhook_enabled"]:
         raise ConfigError("Choose a push service, or enable email")
     if s["provider"] == "none":
         pass
@@ -514,8 +529,12 @@ def email_configured(s):
                 and s["email_from"] and recipients(s))
 
 
+def webhook_configured(s):
+    return bool(s["enabled"] and s["webhook_enabled"] and s["webhook_url"])
+
+
 def configured(s):
-    return push_configured(s) or email_configured(s)
+    return push_configured(s) or email_configured(s) or webhook_configured(s)
 
 
 # ---- rendering ----------------------------------------------------------
@@ -585,6 +604,32 @@ def row_url(s, rid, priority, cam):
     return f"{scheme}://{userinfo}{u.netloc}/{s['topic']}?{query(params)}"
 
 
+def webhook_url(s, rid, cam=False):
+    """Apprise JSON URL for the webhook: POSTs {"title", "message", "type",
+    "attachments": [image as base64], "event": <notification>, "printer":
+    <name>}. The webhook's own query parameters are kept (Apprise sends
+    "-name" parameters as-is)."""
+    u = urlparse(s["webhook_url"])
+    scheme = "jsons" if u.scheme == "https" else "json"
+    userinfo = ""
+    if u.username:
+        userinfo = quote(u.username, safe="") + (
+            ":" + quote(u.password or "", safe="")) + "@"
+    host = u.hostname + (f":{u.port}" if u.port else "")
+    params = [f"-{k}={v}" for k, v in
+              (part.split("=", 1) if "=" in part else (part, "")
+               for part in u.query.split("&") if part)]
+    params += [f":event={quote(rid, safe='')}",
+               f":printer={quote(s['name'], safe='')}"]
+    # The links, as fields (a webhook has no buttons)
+    names = {"Web UI": "web_ui", "Live Camera": "live_camera",
+             "Error Index": "error_index"}
+    params += [f":{names[t]}={quote(url, safe='')}"
+               for t, url in links(s, rid, cam)]
+    return (f"{scheme}://{userinfo}{host}{u.path or '/'}?"
+            + "&".join(params))
+
+
 def spoolman_url():
     """Spoolman URL when the Spoolman integration is enabled, else ''."""
     url = read_cfg().get("spoolman", "host", fallback="").strip()
@@ -612,10 +657,19 @@ def email_rows(s):
     return [rid for rid in available_rows() if s["rows"][rid]["email"]]
 
 
+def webhook_rows(s):
+    """The webhook gets every notification (the receiver picks by
+    "event"), whatever the push and email choices."""
+    if not webhook_configured(s):
+        return []
+    return list(available_rows())
+
+
 def enabled_rows(s):
     """Notifications sent to at least one destination."""
-    push, email = push_rows(s), email_rows(s)
-    return [rid for rid in ROW_IDS if rid in push or rid in email]
+    push, email, hook = push_rows(s), email_rows(s), webhook_rows(s)
+    return [rid for rid in ROW_IDS if rid in push or rid in email
+            or rid in hook]
 
 
 def email_url(s):
@@ -651,7 +705,7 @@ def render_moonraker(s):
     if not rows:
         return None
     cam = camera_status()[s["camera"]]
-    push, email = push_rows(s), email_rows(s)
+    push, email, hook = push_rows(s), email_rows(s), webhook_rows(s)
     out = [
         "# Push notifications; generated from extended2.cfg [notifications].",
         "# Do not edit: changes are overwritten on Moonraker start. Use "
@@ -684,6 +738,8 @@ def render_moonraker(s):
             out.append(f"{rid}: {kind}, {url}")
         if rid in email:
             out.append(f"{rid}_email: {kind}, {email_url(s)}")
+        if rid in hook:
+            out.append(f"{rid}_webhook: {kind}, {webhook_url(s, rid, cam)}")
     return "\n".join(out) + "\n"
 
 
@@ -1066,7 +1122,8 @@ def cmd_test():
     import logging
     import apprise
     import base64
-    secrets = [s["secret"], s["pushover_user"], s["email_password"]]
+    secrets = [s["secret"], s["pushover_user"], s["email_password"],
+               s["webhook_url"]]
     m = RX_DISCORD_WEBHOOK.fullmatch(s["secret"])
     if m:
         secrets.append(m.group(2))
@@ -1115,8 +1172,10 @@ def cmd_test():
     if email_configured(s):
         dests.append((f"email ({s['email_to']}) via {s['email_host']}",
                       email_url(s), None))
+    if webhook_configured(s):
+        dests.append(("the webhook", webhook_url(s, "test", cam), body))
     if not dests:
-        raise ConfigError("Set up a push service or email first")
+        raise ConfigError("Set up a push service, email or a webhook first")
     print("Taking a camera snapshot...")
     path = fetch_snapshot(s)
     for n, (target, url, text) in enumerate(dests):

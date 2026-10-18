@@ -478,6 +478,7 @@ async def test_print_by_object():
         ntfy = FakeService(log, "ntfy")
         server, c = make({"first_layer_objects": mode},
                          {"first_layer": [("ntfy", ntfy, False)],
+                          "layer_started": [("ntfy", ntfy, False)],
                           "object_complete": [("ntfy", ntfy, False)]})
         await start_job(server, filename)
         for layer in range(1, 244):
@@ -503,6 +504,9 @@ async def test_print_by_object():
 
     c, sent = await run("Assembly.gcode", "each")
     check("by-object print job is recognised", c._by_object)
+    check("first layer started: once, when layer 1 begins",
+          [t for t, _ in sent if t == "first layer started"]
+          == ["first layer started"] and sent[0][0] == "first layer started")
     layers = [b for t, b in sent if t.startswith("2nd layer")]
     check("layer complete once per object, from the object's own layers",
           len(layers) == 3 and "Object 2 of 3: Assembly #2" in layers[1],
@@ -519,8 +523,8 @@ async def test_print_by_object():
           and len([t for t, _ in sent if t == "object complete"]) == 2)
     c, sent = await run("Benchy.gcode", "each")
     check("a by-layer print job ignores the object markers",
-          not c._by_object and [t for t, _ in sent] == ["2nd layer complete"],
-          sent)
+          not c._by_object and [t for t, _ in sent]
+          == ["first layer started", "2nd layer complete"], sent)
 
 
 async def test_no_secrets_in_logs():

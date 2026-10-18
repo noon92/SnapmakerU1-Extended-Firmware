@@ -91,7 +91,7 @@ EXCEPTION_EVENT = "snapmaker:exception_notification"
 REMOTE_METHOD = "push_notification"
 MILESTONES = (25, 50, 75)
 ROW_IDS = (
-    "started", "first_layer", "progress_25", "progress_50", "progress_75",
+    "started", "layer_started", "first_layer", "progress_25", "progress_50", "progress_75",
     "paused", "resumed", "object_complete", "complete", "cancelled",
     "error", "warning", "shutdown", "power_loss",
     "filament_short", "filament_low", "spool_switch",
@@ -99,6 +99,7 @@ ROW_IDS = (
 SPOOLMAN_ROWS = ("filament_short", "filament_low", "spool_switch")
 TITLES = {
     "started": "▶️ {name} started",
+    "layer_started": "🎬 {name} first layer started",
     "first_layer": "🔍 {name} {ordinal} layer complete",
     "progress": "⏳ {name} {pct}%",
     "paused": "⏸️ {name} paused",
@@ -158,7 +159,8 @@ NOTIFY_TYPES = {"complete": "success", "object_complete": "success",
 FILE_CAP = 30
 # Emails about one print go in one thread (see _email_prepare). Faults
 # join it while printing and this long after the print ended.
-THREAD_ROWS = ("started", "first_layer", "progress_25", "progress_50",
+THREAD_ROWS = ("started", "layer_started", "first_layer",
+               "progress_25", "progress_50",
                "progress_75", "paused", "resumed", "object_complete",
                "complete", "cancelled",
                "filament_short", "filament_low", "spool_switch")
@@ -176,8 +178,8 @@ SEND_RETRY_DELAYS = (6, 10, 30)   # seconds before each retry of a failed send
 # not be sent this long after they happened (e.g. a long outage): a 25%
 # notification an hour late is noise. Faults and complete never expire.
 URGENT_ROWS = ("error", "warning", "shutdown", "power_loss")
-EXPIRING_ROWS = ("started", "first_layer", "progress_25", "progress_50",
-                 "progress_75", "object_complete")
+EXPIRING_ROWS = ("started", "layer_started", "first_layer", "progress_25",
+                 "progress_50", "progress_75", "object_complete")
 STATUS_EXPIRY = 300.
 # Spoolman usage counts as tracked once spools lost this much; if nothing
 # was used by this far into the file, it isn't tracked and the filament
@@ -478,6 +480,7 @@ class PushNotifications:
         self._job_active = False
         self._job_done_sent = False
         self._first_layer_sent = False
+        self._layer_started_sent = False
         self._milestones_sent: Set[int] = set()
         self._gcode_bytes: Tuple[Any, Any] = (None, None)
         self._job_filename = ""
@@ -993,6 +996,7 @@ class PushNotifications:
         layer = ((self._status["print_stats"].get("info") or {})
                  .get("current_layer") or 0)
         self._first_layer_sent = int(layer) > self.layers_complete
+        self._layer_started_sent = int(layer) >= 1
         self._by_object = await self.eventloop.run_in_thread(
             self._is_by_object, filename)
         self._obj_start = {}
@@ -1172,6 +1176,15 @@ class PushNotifications:
         if not self._job_active or ps.get("state") != "printing":
             return
         filename = ps.get("filename") or ""
+        if "layer_started" in self.rows and not self._layer_started_sent:
+            # Layer 1 begins once the start routine (homing, bed mesh,
+            # flow calibration) is over: time to watch the first layer
+            layer = (ps.get("info") or {}).get("current_layer")
+            if layer is not None and int(layer) >= 1:
+                self._layer_started_sent = True
+                self._spawn(self._send(
+                    "layer_started", self._title("layer_started"),
+                    self._lines(shown(filename), self._time_left())))
         if self._by_object:
             self._track_objects(filename)
         elif "first_layer" in self.rows and not self._first_layer_sent:

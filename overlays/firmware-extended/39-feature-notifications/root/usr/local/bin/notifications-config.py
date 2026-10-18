@@ -70,6 +70,10 @@ AUTH_MODES = ["none", "token", "basic"]
 ROWS = [
     ("started", "Print started", "▶️", True, "default", "render", "print",
      False),
+    # Off by default: for watching the first layer go down after a long
+    # start routine (homing, bed mesh, flow calibration)
+    ("layer_started", "First layer started", "🎬", False, "default",
+     "snapshot", "print", False),
     ("first_layer", "Layer complete", "🔍", False, "default",
      "snapshot", "print", False),
     ("progress_25", "25% complete", "⏳", False, "low", "snapshot", "print",

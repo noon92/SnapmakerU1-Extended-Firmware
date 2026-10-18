@@ -785,9 +785,8 @@ gcode:
     G1 Z{{lift}} F600
     RESTORE_GCODE_STATE NAME=ntfy_lift
     {{% endif %}}
-    {{# Klipper reads G-code ahead of the motion: wait until the toolhead
-        is really up, so the snapshot isn't taken with the nozzle on the
-        part #}}
+    # Klipper reads G-code ahead of the motion: wait until the toolhead
+    # is really up, so the snapshot isn't taken with the nozzle on the part
     M400
 
 [gcode_macro _NTFY_SEND]

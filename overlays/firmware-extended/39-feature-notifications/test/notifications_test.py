@@ -647,6 +647,24 @@ def run_config_tests():
           and "[gcode_macro _CANCEL_PRINT_NTFY]" in klip)
     check("lift only when homed, capped below the stock moves",
           '"z" in th.homed_axes' in klip and "[15, 265 - z]|min" in klip)
+    # As Klipper reads it: "#" to the end of every line is stripped first
+    # (configfile.py comment_r), then the gcode is a Jinja template with
+    # "{" / "}" as the expression delimiters. A "{# ... #}" comment thus
+    # becomes a bare "{" and halts the printer (it did, once).
+    import re as _re
+    import jinja2
+    import configparser as cp
+    env = jinja2.Environment("{%", "%}", "{", "}")
+    parser = cp.RawConfigParser()
+    parser.read_string("\n".join(_re.sub(r"[#;].*$", "", line).rstrip()
+                                  for line in klip.splitlines()))
+    try:
+        for sec in parser.sections():
+            env.from_string(parser.get(sec, "gcode"))
+        check("every macro compiles with Klipper's Jinja delimiters", True)
+    except jinja2.TemplateSyntaxError as e:
+        check("every macro compiles with Klipper's Jinja delimiters", False,
+              str(e))
     check("reports once lifted, with no hold over the part",
           "G4" not in klip and klip.index("M400") < klip.index(
               "[gcode_macro _NTFY_SEND]"))

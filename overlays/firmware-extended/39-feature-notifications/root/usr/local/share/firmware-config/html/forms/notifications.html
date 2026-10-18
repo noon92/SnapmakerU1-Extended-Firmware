@@ -5,6 +5,7 @@
 <style>
     .nt { font-size: 14px; }
     .nt-enable { display: flex; align-items: center; gap: 10px; padding: 12px; background: var(--item); border-radius: 6px; margin-bottom: 16px; cursor: pointer; color: #fff; font-weight: 500; }
+    .nt-enable.nt-sec { font-weight: 600; margin-bottom: 12px; }
     .nt input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; flex: none; }
     .nt-section { font-size: 16px; color: #fff; font-weight: 600; margin: 8px 0 10px; }
     .nt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; margin-bottom: 20px; }
@@ -41,7 +42,6 @@
     .nt-inline .btn.nt-active { border-color: var(--accent); color: var(--accent); }
     .nt-field .nt-hint a { color: var(--accent); }
     .nt-disabled .nt-body { opacity: 0.55; }
-    .nt-sub { margin-bottom: 12px; font-weight: 400; }
     .nt-unit { align-items: center; }
     .nt-unit .nt-input { width: 80px; flex: none; }
     .nt-unit span { color: var(--muted); font-size: 13px; }
@@ -70,6 +70,8 @@
 
     <div class="nt-body">
         <div class="nt-section">Push notifications</div>
+        <label class="nt-enable nt-sec"><input type="checkbox" id="nt-push-enabled"> Send push notifications</label>
+        <div id="nt-push">
         <div class="nt-grid">
             <div class="nt-field">
                 <label for="nt-provider">Push service</label>
@@ -79,7 +81,6 @@
                     <option value="telegram">Telegram</option>
                     <option value="discord_dm">Discord (direct message)</option>
                     <option value="discord">Discord (server channel)</option>
-                    <option value="none">None (email only)</option>
                 </select>
                 <div class="nt-hint" id="nt-provider-hint"></div>
             </div>
@@ -191,9 +192,10 @@
                 <div class="nt-hint">Tip: Use a write-only account for the printer.</div>
             </div>
         </div>
+        </div>
 
         <div class="nt-section">Email</div>
-        <label class="nt-enable nt-sub"><input type="checkbox" id="nt-email-enabled"> Send email notifications</label>
+        <label class="nt-enable nt-sec"><input type="checkbox" id="nt-email-enabled"> Send email notifications</label>
         <div class="nt-grid" id="nt-email">
             <div class="nt-field">
                 <label for="nt-email-preset">Email provider</label>
@@ -239,7 +241,7 @@
         </div>
 
         <div class="nt-section">Webhook</div>
-        <label class="nt-enable nt-sub"><input type="checkbox" id="nt-wh-enabled"> Send every notification to a webhook</label>
+        <label class="nt-enable nt-sec"><input type="checkbox" id="nt-wh-enabled"> Send every notification to a webhook</label>
         <div class="nt-grid" id="nt-webhook">
             <div class="nt-field">
                 <label for="nt-wh-url">Webhook URL</label>
@@ -375,7 +377,7 @@
     // A row is dimmed where it sends nothing: priority without push, image
     // without push or email
     function updateRowDimming() {
-        const push = el('nt-provider').value !== 'none';
+        const push = el('nt-push-enabled').checked;
         const email = el('nt-email-enabled').checked;
         el('nt-rows').querySelectorAll('tr[data-row]').forEach(tr => {
             const id = tr.dataset.row;
@@ -393,8 +395,7 @@
         pushover: '<a href="https://pushover.net" target="_blank">Pushover</a>: one-time purchase per platform after a 30-day trial.',
         telegram: '<a href="https://telegram.org" target="_blank">Telegram</a>: free; notifications come from your own bot, in a private chat or a group. Low and min priority arrive silently.',
         discord_dm: '<a href="https://discord.com" target="_blank">Discord</a>: free; direct messages from your own bot. Low and min priority arrive silently.',
-        discord: '<a href="https://discord.com" target="_blank">Discord</a>: free; posts to a channel on a server you manage. Low and min priority arrive silently.',
-        none: 'Notifications are sent by email only.'
+        discord: '<a href="https://discord.com" target="_blank">Discord</a>: free; posts to a channel on a server you manage. Low and min priority arrive silently.'
     };
 
     const EMAIL_HINTS = {
@@ -535,6 +536,12 @@
             state = data;
             localWarned = false;
             el('nt-enabled').checked = data.enabled;
+            el('nt-push-enabled').checked = data.push_enabled !== false;
+            el('nt-push').style.display = el('nt-push-enabled').checked ? '' : 'none';
+            el('nt-push-enabled').onchange = () => {
+                el('nt-push').style.display = el('nt-push-enabled').checked ? '' : 'none';
+                updateRowDimming();
+            };
             el('nt-provider').value = data.provider;
             el('nt-po-user').value = data.pushover_user;
             el('nt-po-device').value = data.pushover_device;
@@ -650,13 +657,14 @@
 
         collect() {
             const enabled = el('nt-enabled').checked;
+            const pushEnabled = el('nt-push-enabled').checked;
             const provider = el('nt-provider').value;
             const emailEnabled = el('nt-email-enabled').checked;
             const emailPassword = el('nt-email-password').value;
             const webhookEnabled = el('nt-wh-enabled').checked;
             const webhookUrl = el('nt-wh-url').value.trim();
-            if (enabled && provider === 'none' && !emailEnabled && !webhookEnabled) {
-                throw new Error('Choose a push service, or enable email or a webhook.');
+            if (enabled && !pushEnabled && !emailEnabled && !webhookEnabled) {
+                throw new Error('Enable push notifications, email or a webhook.');
             }
             if (webhookEnabled && !webhookUrl && !state.has_webhook_url) {
                 throw new Error('Enter the webhook URL.');
@@ -710,7 +718,7 @@
                 };
             });
             const payload = {
-                enabled, provider, server, topic, auth,
+                enabled, push_enabled: pushEnabled, provider, server, topic, auth,
                 pushover_user: el('nt-po-user').value.trim(),
                 pushover_device: el('nt-po-device').value.trim(),
                 telegram_chat: el('nt-tg-chat').value.trim(),

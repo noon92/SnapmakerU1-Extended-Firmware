@@ -717,15 +717,24 @@ def run_config_tests():
           and "\ncomplete_webhook: snapshot, jsons://" in wmoon)
     check("webhook gets notifications that push and email don't",
           "progress_25_webhook:" in wmoon and "\nprogress_25:" not in wmoon)
-    hook_only = nc.validate(dict(enabled=True, provider="none",
+    hook_only = nc.validate(dict(enabled=True, push_enabled=False,
                                  webhook_enabled=True,
                                  webhook_url="http://hooks.local/x"),
                             nc.load())
     check("a webhook alone is enough (print hooks generated)",
           nc.configured(hook_only) and nc.render_klipper(hook_only))
-    bad(dict(provider="none", webhook_enabled=True,
+    bad(dict(push_enabled=False, webhook_enabled=True,
              webhook_url="ftp://example.com/x"),
         "rejects a webhook that isn't http(s)")
+    bad(dict(push_enabled=False), "rejects nothing enabled at all")
+    check("push off: no push lines, and the provider's fields aren't checked",
+          "\nstarted:" not in nc.render_moonraker(nc.validate(
+              dict(enabled=True, push_enabled=False, provider="ntfy",
+                   server="", email_enabled=True, email_host="smtp.x.com",
+                   email_from="a@x.com", email_to="b@x.com"), nc.load())))
+    check("older settings: provider none means push off",
+          not nc.load_from({"provider": "none", "enabled": "true"})
+          ["push_enabled"])
     check("Discord: mention only on high/max",
           "ping=everyone" in nc.row_url(d, "error", "max", True)
           and "ping" not in nc.row_url(d, "complete", "default", True))

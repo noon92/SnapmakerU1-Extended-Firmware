@@ -48,7 +48,7 @@ ERROR_INDEX_URL = ("https://wiki.snapmaker.com/en/snapmaker_u1/"
 SNAPSHOT_PATH = {"internal": "/webcam/snapshot.jpg",
                  "usb": "/webcam2/snapshot.jpg"}
 LIVE_PATH = {"internal": "/webcam/webrtc", "usb": "/webcam2/webrtc"}
-PROVIDERS = ["ntfy", "pushover", "telegram", "discord", "discord_dm", "none"]
+PROVIDERS = ["ntfy", "pushover", "telegram", "discord", "discord_dm"]
 EMAIL_SECURITY = ["starttls", "ssl", "none"]
 PRIORITIES = ["min", "low", "default", "high", "max"]
 # Pushover emergency (2) repeats until acknowledged, beyond ntfy's "max";
@@ -70,6 +70,10 @@ AUTH_MODES = ["none", "token", "basic"]
 ROWS = [
     ("started", "Print started", "▶️", True, "default", "render", "print",
      False),
+    ("paused", "Print paused", "⏸️", True, "default", "snapshot", "print",
+     False),
+    ("resumed", "Print resumed", "▶️", False, "default", "snapshot", "print",
+     False),
     # Off by default: for watching the first layer go down after a long
     # start routine (homing, bed mesh, flow calibration)
     ("layer_started", "First layer started", "🎬", False, "default",
@@ -82,13 +86,10 @@ ROWS = [
      False),
     ("progress_75", "75% complete", "⏳", False, "low", "snapshot", "print",
      False),
-    ("paused", "Paused", "⏸️", True, "default", "snapshot", "print", False),
-    ("resumed", "Resumed", "▶️", False, "default", "snapshot", "print",
-     False),
     ("complete", "Print complete", "✅", True, "default", "snapshot", "print",
      False),
-    ("cancelled", "Cancelled", "🚫", True, "default", "snapshot", "print",
-     False),
+    ("cancelled", "Print cancelled", "🚫", True, "default", "snapshot",
+     "print", False),
     ("error", "Error", "⚠️", True, "max", "snapshot", "fault", True),
     ("warning", "Warning", "⚠️", True, "max", "snapshot", "fault", True),
 
@@ -167,6 +168,8 @@ class ConfigError(Exception):
 def defaults():
     return {
         "enabled": False,
+        # Push, email and the webhook are each behind their own checkbox
+        "push_enabled": True,
         "provider": "ntfy",
         "server": "",
         "topic": "u1",
@@ -215,12 +218,25 @@ def read_cfg():
 
 
 def load():
+    return load_from(read_cfg())
+
+
+def load_from(cfg):
+    """Settings from a parsed extended2.cfg (or a plain dict of the
+    [notifications] section), over the defaults."""
     s = defaults()
-    cfg = read_cfg()
-    if not cfg.has_section(SECTION):
+    if isinstance(cfg, dict):
+        sec = cfg
+    elif not cfg.has_section(SECTION):
         return s
-    sec = cfg[SECTION]
+    else:
+        sec = cfg[SECTION]
     s["enabled"] = sec.get("enabled", "false").strip().lower() == "true"
+    s["push_enabled"] = \
+        sec.get("push_enabled", "true").strip().lower() == "true"
+    if sec.get("provider", "").strip() == "none":
+        # Older settings: "none" meant no push service
+        s["push_enabled"] = False
     s["email_enabled"] = \
         sec.get("email_enabled", "false").strip().lower() == "true"
     s["webhook_enabled"] = \
@@ -270,6 +286,7 @@ def section_lines(s):
         f"[{SECTION}]",
         "# Push notifications; managed by firmware-config.",
         f"enabled: {'true' if s['enabled'] else 'false'}",
+        f"push_enabled: {'true' if s['push_enabled'] else 'false'}",
         f"provider: {s['provider']}",
         f"server: {s['server']}",
         f"topic: {s['topic']}",
@@ -348,6 +365,8 @@ def validate(data, current):
     s = json.loads(json.dumps(current))
     if "enabled" in data:
         s["enabled"] = bool(data["enabled"])
+    if "push_enabled" in data:
+        s["push_enabled"] = bool(data["push_enabled"])
     if "email_enabled" in data:
         s["email_enabled"] = bool(data["email_enabled"])
     if "webhook_enabled" in data:
@@ -424,10 +443,10 @@ def validate(data, current):
             or not urlparse(s["webhook_url"]).hostname):
         raise ConfigError("Webhook URL must look like "
                           "https://example.com/hook")
-    if s["enabled"] and s["provider"] == "none" and \
+    if s["enabled"] and not s["push_enabled"] and \
             not s["email_enabled"] and not s["webhook_enabled"]:
-        raise ConfigError("Choose a push service, or enable email")
-    if s["provider"] == "none":
+        raise ConfigError("Enable push notifications, email or a webhook")
+    if not s["push_enabled"]:
         pass
     elif s["provider"] == "ntfy":
         if s["enabled"] or s["server"]:
@@ -529,7 +548,7 @@ def is_public(server):
 
 
 def push_configured(s):
-    if not s["enabled"]:
+    if not s["enabled"] or not s["push_enabled"]:
         return False
     if s["provider"] == "ntfy":
         return bool(s["server"] and s["topic"])
@@ -880,7 +899,8 @@ def telegram_find_chat(s):
     """Fill in an empty Telegram chat ID from the bot's recent messages:
     the chat of the latest message sent to the bot (a private chat, or a
     group the bot was added to). Telegram keeps them for 24 hours."""
-    if s["provider"] != "telegram" or s["telegram_chat"] or not s["secret"]:
+    if not s["push_enabled"] or s["provider"] != "telegram" or \
+            s["telegram_chat"] or not s["secret"]:
         return
     url = f"{TELEGRAM_API}{s['secret']}/getUpdates"
     try:
@@ -997,7 +1017,8 @@ def discord_find_user(s):
     """Discord DM: check the bot token and send to the bot's owner (the
     person who made it in the Developer Portal) unless a user ID is set.
     The bot must share a server with that user."""
-    if s["provider"] != "discord_dm" or not s["secret"]:
+    if not s["push_enabled"] or s["provider"] != "discord_dm" or \
+            not s["secret"]:
         return
     d = discord_module()
     app, why = d.bot_info(s["secret"])

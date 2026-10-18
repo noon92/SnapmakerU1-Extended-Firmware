@@ -17,12 +17,12 @@ server), and/or to a webhook for home automation.
 | Notification | Image | Notes |
 |---|---|---|
 | ▶️ Print started | Model preview | The slicer thumbnail, and the slicer's estimated print time and ETA |
+| ⏸️ Print paused / ▶️ Print resumed | Camera | Resumed includes time left and ETA |
 | 🎬 First layer started | Camera | Off by default. When the first layer begins, after the start routine (homing, bed mesh, flow calibration can take a while): time to watch it go down. With time left and ETA |
 | 🔍 1st / 2nd / 3rd layer complete | Camera | Choose after which layer (default: 2nd). When printing by object (Orca's *print sequence: by object*), once per object, counted from the object's own first layer, or once per print job |
 | ⏳ 25% / 50% / 75% complete | Camera | Same percentage as Fluidd and the Snapmaker app, with time left and ETA |
-| ⏸️ Paused / ▶️ Resumed | Camera | Resumed includes time left and ETA |
 | ✅ Print complete | Camera | Includes print time. When printing by object: once per object as each one finishes and the next begins ("📦 object complete", with which object, e.g. "Object 2 of 3: Assembly", and time left; the last object's is the Print complete notification itself), or once per print job |
-| 🚫 Cancelled | Camera | |
+| 🚫 Print cancelled | Camera | |
 | ⚠️ Error | Camera | Faults that pause or stop a print, e.g. filament runout or a dirty bed |
 | ⚠️ Warning | Camera | Faults that don't stop a print, e.g. a toolhead contact warning |
 | 🛑 Klipper shutdown | Camera | Heater, thermistor and MCU faults, emergency stop |
@@ -256,8 +256,9 @@ notification as their subject.
 1. Open [Firmware Config](firmware_config.md) and go to
    **Settings > Monitoring & Debugging > Push Notifications**, then click
    **Configure**.
-2. Check **Enable notifications** and choose the **Push service** (or
-   **None** for email only):
+2. Check **Enable notifications**. Push, email and the webhook each have
+   their own checkbox; at least one must be on. For push, choose the
+   **Push service**:
    - **ntfy**: enter your **Server URL** (e.g. `http://192.168.1.10:8080`), or
      click **Use public server** for ntfy.sh. Keep the default **Topic** (`u1`),
      or enter or generate another, and
@@ -321,6 +322,7 @@ Settings are stored in `extended2.cfg` under `[notifications]`:
 ```ini
 [notifications]
 enabled: true
+push_enabled: true
 provider: ntfy
 server: https://ntfy.example.com
 topic: u1-printer

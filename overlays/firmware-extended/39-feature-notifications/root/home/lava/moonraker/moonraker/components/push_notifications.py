@@ -81,7 +81,7 @@ except Exception as e:
     logging.warning("[push_notifications] Discord unavailable: %s", e)
     discord = None  # type: ignore
 
-from ..common import JobEvent
+from ..common import JobEvent, KlippyState
 
 if TYPE_CHECKING:
     from ..confighelper import ConfigHelper
@@ -172,6 +172,10 @@ PTC_FIELDS = ["extruder_map_table", "filament_spool_id", "extruders_used",
               "filament_sub_type", "filament_color_rgba"]
 # A job that starts this far into its file is a power-loss recovery
 RECOVERY_MIN_PROGRESS = 0.01
+# ...and either kept its print time, or is this far in (a small file's
+# start G-code alone is past 1 %)
+RECOVERY_MIN_TIME = 30.
+RECOVERY_SURE_PROGRESS = 0.10
 SEND_RETRY_DELAYS = (6, 10, 30)   # seconds before each retry of a failed send
 # Within one service (services never wait on each other), faults go ahead of
 # everything else, and these status notifications are dropped if they could
@@ -421,7 +425,14 @@ class PushNotifications:
         # Email thread of the current print: {"id", "file"}; kept across
         # restarts so a power-loss recovery continues the same thread
         self._thread: Optional[Dict[str, str]] = None
-        self._job_ended = 0.     # monotonic time the last job finished
+        self._job_ended = -1e9   # monotonic time the last job finished
+        # Bumped when a job starts or ends: an await that outlives its job
+        # (seeding, the filament watch) checks it and gives up
+        self._job_gen = 0
+        # Klipper keeps print_stats.exception after a fault-pause is
+        # resumed; the fault is over, and must not colour a later pause or
+        # cancel. A new fault arrives as an exception event and clears this.
+        self._stale_fault: Optional[FaultKey] = None
         self._pl_file = ""       # file of the print a power loss stopped
         # Spools already reported as running low (spool id -> time)
         self._low_sent: Optional[Dict[str, float]] = None
@@ -528,6 +539,21 @@ class PushNotifications:
             logging.error("[push_notifications] state query failed: %s", e)
             return {}
 
+    def _klippy_shutdown(self) -> bool:
+        try:
+            kconn = self.server.lookup_component("klippy_connection")
+            return kconn.state == KlippyState.SHUTDOWN
+        except Exception:
+            return False
+
+    def _live_fault(self, ps: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The fault in print_stats, unless it's the one a resume already
+        put behind us (Klipper doesn't clear it on RESUME)."""
+        ex = coded(ps)
+        if ex is not None and fault_key(ex) == self._stale_fault:
+            return None
+        return ex
+
     def _fault_recent(self, key: FaultKey) -> bool:
         last = self._faults_sent.get(key)
         return last is not None and \
@@ -561,8 +587,13 @@ class PushNotifications:
             return None
         tmpdir = tempfile.mkdtemp(prefix="push_notifications_")
         path = os.path.join(tmpdir, "snapshot.jpg")
-        with open(path, "wb") as f:
-            f.write(data)
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            logging.warning("[push_notifications] snapshot not saved: %s", e)
+            return None
         return path
 
     async def _fetch_snapshot(self, quiet: bool = False) -> Optional[str]:
@@ -632,7 +663,7 @@ class PushNotifications:
             try:
                 results = await asyncio.gather(*(
                     self._deliver(rid, d, t, [(title, body, path)])
-                    for d, t in zip(dests, tickets)))
+                    for d, t in zip(dests, tickets)), return_exceptions=True)
             finally:
                 if path is not None and image == "snapshot":
                     shutil.rmtree(os.path.dirname(path), ignore_errors=True)
@@ -816,9 +847,12 @@ class PushNotifications:
                     self._skip(what, "too old (sent more than %d min after "
                                "it happened)" % (STATUS_EXPIRY // 60))
                     return False
-                for srv in ap:
-                    if hasattr(srv, "headers"):
-                        srv.headers = dict(headers)
+                if dest.email:
+                    # Thread headers for email only: a webhook's own
+                    # +Header parameters would be wiped
+                    for srv in ap:
+                        if hasattr(srv, "headers"):
+                            srv.headers = dict(headers)
                 # Each attempt waits for the server's answer before the next
                 # is scheduled. The last one is text only, in case the image
                 # is what the server rejects (e.g. no attachments allowed).
@@ -916,11 +950,22 @@ class PushNotifications:
     ) -> None:
         ps = new_stats
         filename = ps.get("filename") or ""
-        ex = coded(ps)
+        ex = self._live_fault(ps)
         if job_event == JobEvent.STARTED:
+            self._stale_fault = None
+            self._job_gen += 1
+            gen = self._job_gen
             progress = await self._start_job(filename)
-            self._thread_start(filename, progress >= RECOVERY_MIN_PROGRESS)
-            if progress >= RECOVERY_MIN_PROGRESS:
+            if gen != self._job_gen:
+                return      # the job ended while it was being seeded
+            # Snapmaker resumes a power-loss print as a new job, part-way
+            # into the file with its print time kept. A small file's start
+            # G-code alone is past 1 %, so the print time decides there.
+            recovered = progress >= RECOVERY_MIN_PROGRESS and (
+                float(ps.get("print_duration") or 0.) > RECOVERY_MIN_TIME
+                or progress >= RECOVERY_SURE_PROGRESS)
+            self._thread_start(filename, recovered)
+            if recovered:
                 # Snapmaker resumes a power-loss print as a new job
                 self._spawn(self._send(
                     "resumed", self._title("recovered"),
@@ -941,28 +986,38 @@ class PushNotifications:
                     "error", self._title("error", kind="paused"),
                     f"{shown(filename)}\n{describe(ex)}",
                     delay=PAUSE_SNAPSHOT_DELAY))
-            elif ex is None or "error" not in self.rows:
+            else:
                 self._spawn(self._send(
                     "paused", self._title("paused"), shown(filename),
                     delay=PAUSE_SNAPSHOT_DELAY))
         elif job_event == JobEvent.RESUMED:
+            if ex is not None:
+                self._stale_fault = fault_key(ex)
             self._status["print_stats"].update(
                 {k: ps[k] for k in ("print_duration",) if k in ps})
             self._spawn(self._send(
                 "resumed", self._title("resumed"),
                 self._lines(shown(filename), self._time_left())))
         elif job_event == JobEvent.ERROR:
+            # A Klipper shutdown ends the job with an error too: that goes
+            # to the shutdown row (the exception handler would otherwise
+            # find it already reported here)
+            shutdown = self._klippy_shutdown()
+            rid = "shutdown" if shutdown else "error"
             if self._job_done_sent or \
                     (ex is not None and self._fault_recent(fault_key(ex))):
-                self._skip("error", "already reported")
-            elif "error" in self.rows:
+                self._skip(rid, "already reported")
+            elif rid in self.rows:
                 if ex is not None:
                     self._mark_fault(fault_key(ex))
                     detail = f"{describe(ex)}"
                 else:
                     detail = ps.get("message") or "Print failed"
+                if shutdown:
+                    self._last_fault_send = time.monotonic()
                 self._spawn(self._send(
-                    "error", self._title("error", kind="error"),
+                    rid, self._title("shutdown") if shutdown
+                    else self._title("error", kind="error"),
                     f"{shown(filename)}\n{detail}"))
         elif job_event in (JobEvent.COMPLETE, JobEvent.CANCELLED):
             if self._job_done_sent:
@@ -977,6 +1032,7 @@ class PushNotifications:
         if job_event.finished:
             self._job_active = False
             self._job_ended = time.monotonic()
+            self._job_gen += 1
             self._filament_job += 1
 
     async def _start_job(self, filename: str, query: bool = True) -> float:
@@ -1024,26 +1080,34 @@ class PushNotifications:
             self._job_done_sent = True
             state = await self._query({"print_stats": None})
             ps = state.get("print_stats") or {}
-            ex = coded(ps)
-            if event == "cancelled" and ex is not None:
+            ex = self._live_fault(ps)
+            reported = ex is not None and self._fault_recent(fault_key(ex))
+            if event == "cancelled" and ex is not None and not reported:
                 # Mark now, so the job 'error' event that follows a
                 # fault-cancel is not reported a second time
                 self._mark_fault(fault_key(ex))
-            self._spawn(self._report_end(event, ps, from_hook=True))
+            self._spawn(self._report_end(event, ps, from_hook=True,
+                                         fault_reported=reported))
         else:
             logging.warning("[push_notifications] unknown hook event: %s",
                             event)
 
     async def _report_end(
-        self, event: str, ps: Dict[str, Any], from_hook: bool = False
+        self, event: str, ps: Dict[str, Any], from_hook: bool = False,
+        fault_reported: bool = False
     ) -> None:
+        """`fault_reported`: the fault behind this cancel was already sent
+        with its pause, so this is a plain cancel that names it."""
         self._job_done_sent = True
         filename = ps.get("filename") or ""
-        ex = coded(ps)
+        ex = self._live_fault(ps)
         if event == "complete":
             rid, title = "complete", self._title("complete")
             body = f"{shown(filename)}\nPrint time: " \
                 f"{format_duration(ps.get('print_duration', 0))}"
+        elif ex is not None and fault_reported:
+            rid, title = "cancelled", self._title("cancelled")
+            body = f"{shown(filename)}\nAfter: {describe(ex)}"
         elif ex is not None:
             rid = self._fault_row()
             if rid is None:
@@ -1072,6 +1136,8 @@ class PushNotifications:
 
     # Event handlers must return quickly; do the waiting in a task.
     async def _on_exception(self, excep: Dict[str, Any]) -> None:
+        if fault_key(excep) == self._stale_fault:
+            self._stale_fault = None    # it happened again
         self._spawn(self._handle_exception(dict(excep)))
 
     async def _on_klippy_shutdown(self) -> None:
@@ -1127,7 +1193,10 @@ class PushNotifications:
         ps = state.get("print_stats") or {}
         msg = (wh.get("state_message") or "").strip()
         msg = msg.splitlines()[0] if msg else "Klipper shutdown"
-        filename = ps.get("filename") or ""
+        # print_stats keeps the last file name after the job: name it only
+        # if the shutdown interrupted it
+        filename = ps.get("filename") or "" \
+            if ps.get("state") in ("printing", "paused") else ""
         self._last_fault_send = time.monotonic()
         await self._send("shutdown", self._title("shutdown"),
                          f"{shown(filename)}\n{msg}" if filename else msg)
@@ -1176,6 +1245,12 @@ class PushNotifications:
         if not self._job_active or ps.get("state") != "printing":
             return
         filename = ps.get("filename") or ""
+        if self._by_object and not self._objects():
+            # No EXCLUDE_OBJECT markers (label objects off): nothing to
+            # track per object, so it's reported like a by-layer job
+            self._by_object = False
+            logging.info("[push_notifications] no object markers in %s: "
+                         "reported as one job", shown(filename))
         if "layer_started" in self.rows and not self._layer_started_sent:
             # Layer 1 begins once the start routine (homing, bed mesh,
             # flow calibration) is over: time to watch the first layer
@@ -1264,7 +1339,8 @@ class PushNotifications:
                 self._object_done(prev, filename)
         cur = self._obj_cur
         if not cur or "first_layer" not in self.rows or \
-                cur in self._obj_first_sent:
+                cur in self._obj_first_sent or \
+                cur in (ex.get("excluded_objects") or []):
             return
         if self.first_layer_objects != "each" and self._first_layer_sent:
             return
@@ -1488,10 +1564,11 @@ class PushNotifications:
         start, before it ran out)."""
         if not ptc.get("auto_replenish_filament"):
             return []
-        any_colour = bool(ptc.get("replenish_ignore_color"))
-        keys = ["filament_type"] if any_colour else [
-            "filament_type", "filament_vendor", "filament_sub_type",
-            "filament_color_rgba"]
+        # print_task_config.py: vendor, type and sub-type must match; with
+        # "ignore colour" the nearest colour is taken, else the same colour
+        keys = ["filament_type", "filament_vendor", "filament_sub_type"]
+        if not ptc.get("replenish_ignore_color"):
+            keys.append("filament_color_rgba")
         exist = list(ptc.get("filament_exist") or [])
 
         def attrs(src: Dict[str, Any], c: int) -> List[str]:
@@ -1936,14 +2013,16 @@ class PushNotifications:
             return
         logging.info("[push_notifications] filament: toolhead map changed "
                      "%s -> %s", old[:4], new[:4])
-        # The printer resets the map when a print ends, so only a change
-        # while printing counts, and only one that looks like a refill:
-        # every moved slicer filament leaves the same (empty) toolhead,
-        # for a toolhead the printer is allowed to refill it from.
-        # The reset comes ~10 s after the print-end hook, while print_stats
-        # still says "printing", so the hook report counts as the end too.
-        if (self._job_done_sent
-                or self._status["print_stats"].get("state") != "printing"):
+        # The printer refills while the print job is paused (it pauses on
+        # the runout, swaps the map, then resumes), and resets the map when
+        # the job ends: only a change during the job counts, and only one
+        # that looks like a refill: every moved slicer filament leaves the
+        # same (empty) toolhead, for a toolhead the printer is allowed to
+        # refill it from. The reset comes ~10 s after the print-end hook,
+        # while print_stats still says "printing", so the hook report
+        # counts as the end too.
+        if (self._job_done_sent or self._status["print_stats"].get("state")
+                not in ("printing", "paused")):
             return
         moved = [t for t in range(min(len(old), len(new)))
                  if old[t] != new[t] and t in self._job_tools]
@@ -2056,10 +2135,11 @@ class PushNotifications:
     def _render_rows(self, rows: List[Dict[str, Any]]) -> Optional[str]:
         if images is None:
             return None
+        tmpdir = tempfile.mkdtemp(prefix="push_notifications_")
         try:
-            tmpdir = tempfile.mkdtemp(prefix="push_notifications_")
             return images.render(rows, os.path.join(tmpdir, "spools.jpg"))
         except Exception as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
             logging.warning("[push_notifications] spool image failed: %s", e)
             return None
 
@@ -2105,7 +2185,8 @@ class PushNotifications:
                 per_dest.append(out)
             results = await asyncio.gather(*(
                 self._deliver(rid, d, t, msgs)
-                for d, t, msgs in zip(dests, tickets, per_dest)))
+                for d, t, msgs in zip(dests, tickets, per_dest)),
+                return_exceptions=True)
         finally:
             for t in tickets:
                 await t.gate.done(t.ticket)

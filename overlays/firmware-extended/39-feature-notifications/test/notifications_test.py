@@ -22,6 +22,9 @@ import re
 import shutil
 import smtplib
 import sys
+
+# The build copies root/ as it is: no bytecode left in it by a test run
+sys.dont_write_bytecode = True
 import tempfile
 import time
 import types
@@ -54,6 +57,8 @@ open(os.path.join(PKG, "__init__.py"), "w").close()
 open(os.path.join(PKG, "components", "__init__.py"), "w").close()
 with open(os.path.join(PKG, "common.py"), "w") as f:
     f.write('''from enum import Enum
+class KlippyState(Enum):
+    DISCONNECTED = 1; STARTUP = 2; READY = 3; ERROR = 4; SHUTDOWN = 5
 class JobEvent(Enum):
     STANDBY = 1; STARTED = 2; PAUSED = 3; RESUMED = 4
     COMPLETE = 5; CANCELLED = 6; ERROR = 7
@@ -460,6 +465,122 @@ async def test_filament_measured():
           c._need_now(1) is None)
 
 
+async def test_faults_over_a_job():
+    print("Faults across pause, resume and cancel")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({}, {r: [("ntfy", ntfy, False)] for r in
+                          ("error", "paused", "resumed", "cancelled",
+                           "shutdown")})
+    await start_job(server)
+    ex = {"level": 2, "id": 532, "index": 0, "code": 2,
+          "message": "filament runout"}
+    events = server.handlers["job_state:state_changed"]
+    STATE["print_stats"] = ps("paused", exception=ex)
+    await events(JobEvent.PAUSED, {}, STATE["print_stats"])
+    await server.handlers["snapmaker:exception_notification"](ex)
+    # Resumed: Klipper keeps print_stats.exception
+    STATE["print_stats"] = ps("printing", exception=ex)
+    await events(JobEvent.RESUMED, {}, STATE["print_stats"])
+    # A plain pause an hour later must not be the old fault again
+    STATE["print_stats"] = ps("paused", exception=ex)
+    await events(JobEvent.PAUSED, {}, STATE["print_stats"])
+    STATE["print_stats"] = ps("printing", exception=ex)
+    await events(JobEvent.RESUMED, {}, STATE["print_stats"])
+    # ...nor a cancel from the print hook
+    await server.remote["push_notification"](event="cancelled")
+    await asyncio.sleep(0.6)
+    titles = [e["title"].split(" ", 1)[1] for e in log]
+    check("a resumed fault doesn't colour a later pause or cancel",
+          titles == ["U1 Error: paused", "U1 resumed", "U1 paused",
+                     "U1 resumed", "U1 cancelled"], titles)
+
+    # The same fault again is a new fault
+    log.clear()
+    await start_job(server)
+    STATE["print_stats"] = ps("paused", exception=ex)
+    await events(JobEvent.PAUSED, {}, STATE["print_stats"])
+    STATE["print_stats"] = ps("printing", exception=ex)
+    await events(JobEvent.RESUMED, {}, STATE["print_stats"])
+    await asyncio.sleep(0.6)
+    c._faults_sent.clear()
+    await server.handlers["snapmaker:exception_notification"](ex)
+    STATE["print_stats"] = ps("paused", exception=ex)
+    await events(JobEvent.PAUSED, {}, STATE["print_stats"])
+    await asyncio.sleep(0.6)
+    titles = [e["title"].split(" ", 1)[1] for e in log]
+    check("the fault happening again is reported again",
+          titles[-1] == "U1 Error: paused", titles)
+
+    # Fault-pause, then the user cancels: one error, then a cancel
+    # naming the fault
+    log.clear()
+    await start_job(server)
+    STATE["print_stats"] = ps("paused", exception=ex)
+    c._faults_sent.clear()
+    await events(JobEvent.PAUSED, {}, STATE["print_stats"])
+    await server.remote["push_notification"](event="cancelled")
+    await asyncio.sleep(0.6)
+    titles = [e["title"].split(" ", 1)[1] for e in log]
+    check("cancel after a reported fault-pause: no second error",
+          titles == ["U1 Error: paused", "U1 cancelled"]
+          and "After:" in log[-1]["body"], (titles, log[-1]["body"]))
+
+    # A small file: 1 % at start is the start G-code, not a recovery
+    log.clear()
+    STATE["virtual_sdcard"] = {"file_position": 1200, "progress": 0.02}
+    STATE["print_stats"] = ps("printing", print_duration=0)
+    await server.handlers["server:klippy_ready"]()
+    await events(JobEvent.STARTED, {}, STATE["print_stats"])
+    await asyncio.sleep(0.3)
+    check("a fresh job 2 % into a small file is 'started'",
+          c._thread_recovered is False if hasattr(c, "_thread_recovered")
+          else not [e for e in log if "power loss" in e["title"]])
+
+
+async def test_spool_switch():
+    print("Refill from a backup spool (happens while paused)")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({"spoolman_url": "http://spoolman:7912",
+                      "filament_low_percent": "0", "filament_low_grams": "0"},
+                     {"spool_switch": [("ntfy", ntfy, False)]})
+    for sid in (10, 20):
+        SPOOLS[sid] = {"id": sid, "remaining_weight": 500.0,
+                       "initial_weight": 1000,
+                       "filament": {"name": "PLA", "vendor": {"name": "X"},
+                                    "color_hex": "FF0000", "weight": 1000}}
+    META["filament_weight"] = [50.0]
+    STATE["print_task_config"] = {
+        "extruder_map_table": [0, 0], "filament_spool_id": [10, 20],
+        "extruders_used": [True, False], "auto_replenish_filament": True,
+        "replenish_ignore_color": False, "filament_exist": [True, True],
+        "filament_vendor": ["X", "X"], "filament_type": ["PLA", "PLA"],
+        "filament_sub_type": ["", ""], "filament_color_rgba": ["FF0000FF"] * 2}
+    await start_job(server)
+    await asyncio.sleep(0.3)
+    # Runout: the printer pauses, moves T0 to toolhead 2, resumes
+    STATE["print_stats"]["state"] = "paused"
+    c._status["print_stats"]["state"] = "paused"
+    await c._on_status_update(
+        {"print_task_config": {"extruder_map_table": [1, 0]}}, 0)
+    await asyncio.sleep(0.6)
+    check("a refill while paused is reported",
+          [e["title"] for e in log] == ["🔄 U1 switched to backup spool"],
+          [e["title"] for e in log])
+    STATE["print_task_config"]["filament_vendor"] = ["X", "Y"]
+    c._job_map = [0, 0]
+    log.clear()
+    await c._on_status_update(
+        {"print_task_config": {"extruder_map_table": [1, 0],
+                               "filament_vendor": ["X", "Y"]}}, 0)
+    await asyncio.sleep(0.4)
+    check("another vendor isn't a refill the printer would do",
+          not log, [e["title"] for e in log])
+
+
 async def test_print_by_object():
     print("Print by object: layer and object notifications")
     reset_world()
@@ -582,6 +703,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
+              test_faults_over_a_job, test_spool_switch,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

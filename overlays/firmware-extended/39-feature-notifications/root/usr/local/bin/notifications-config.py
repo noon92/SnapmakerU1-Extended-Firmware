@@ -101,6 +101,10 @@ ROWS = [
      "spool", "spoolman", False),
 ]
 ROW_IDS = [r[0] for r in ROWS]
+# Print-by-object: "Print complete" for each object is sent as its own
+# notification (so a webhook sees event=object_complete), with the Print
+# complete row's settings. It isn't a row of its own in the form.
+OBJECT_ROW = "object_complete"
 ROW = {r[0]: r for r in ROWS}
 ERROR_ROWS = ("error", "warning", "shutdown")
 SPOOLMAN_ROWS = ("filament_short", "filament_low", "spool_switch")
@@ -135,7 +139,9 @@ SEND_READ_TIMEOUT = 60.
 STRING_FIELDS = ("provider", "server", "topic", "auth", "username",
                  "pushover_user", "pushover_device", "telegram_chat",
                  "discord_user", "discord_mention", "printer_url",
-                 "camera", "name", "timezone", "email_host",
+                 "camera", "name", "timezone", "first_layer_objects",
+                 "complete_objects",
+                 "email_host",
                  "email_security", "email_username", "email_from",
                  "email_to")
 SECRET_FIELDS = ("secret", "email_password", "webhook_url")
@@ -173,6 +179,10 @@ def defaults():
         "name": "U1",
         "timezone": "",
         "layers_complete": 2,
+        # Print-by-object: "layer N complete" and "Print complete" for
+        # each object, or once per print job
+        "first_layer_objects": "each",
+        "complete_objects": "each",
         "filament_low_percent": 10,
         "filament_low_grams": 50,
         "email_enabled": False,
@@ -272,6 +282,8 @@ def section_lines(s):
         f"name: {s['name']}",
         f"timezone: {s['timezone']}",
         f"layers_complete: {s['layers_complete']}",
+        f"first_layer_objects: {s['first_layer_objects']}",
+        f"complete_objects: {s['complete_objects']}",
         f"filament_low_percent: {s['filament_low_percent']}",
         f"filament_low_grams: {s['filament_low_grams']}",
         f"spoolman_rev: {SPOOLMAN_REV}",
@@ -390,6 +402,10 @@ def validate(data, current):
         raise ConfigError("Invalid camera")
     if s["layers_complete"] not in (1, 2, 3):
         raise ConfigError("Layer must be 1, 2 or 3")
+    for key in ("first_layer_objects", "complete_objects"):
+        if s[key] not in ("each", "once"):
+            raise ConfigError("When printing by object: once per object "
+                              "or once per print job")
     if not RX_NAME.fullmatch(s["name"]):
         raise ConfigError("Printer name: up to 32 letters, digits, spaces "
                           "and . _ - ( )")
@@ -717,6 +733,8 @@ def render_moonraker(s):
     if cam:
         out.append(f"snapshot_url: {SNAPSHOT_HOST}{SNAPSHOT_PATH[s['camera']]}")
     out.append(f"layers_complete: {s['layers_complete']}")
+    out.append(f"first_layer_objects: {s['first_layer_objects']}")
+    out.append(f"complete_objects: {s['complete_objects']}")
     if s["timezone"]:
         out.append(f"timezone: {s['timezone']}")
     if any(r in rows for r in SPOOLMAN_ROWS):
@@ -733,13 +751,17 @@ def render_moonraker(s):
             out.append(f"camera_url: {root}{LIVE_PATH[s['camera']]}")
     for rid in rows:
         kind = image_kind(s, rid, cam)
-        if rid in push:
-            url = row_url(s, rid, s["rows"][rid]["priority"], cam)
-            out.append(f"{rid}: {kind}, {url}")
-        if rid in email:
-            out.append(f"{rid}_email: {kind}, {email_url(s)}")
-        if rid in hook:
-            out.append(f"{rid}_webhook: {kind}, {webhook_url(s, rid, cam)}")
+        # The object-complete notification follows the Print complete row
+        for name in ([rid, OBJECT_ROW] if rid == "complete"
+                     and s["complete_objects"] == "each" else [rid]):
+            if rid in push:
+                url = row_url(s, rid, s["rows"][rid]["priority"], cam)
+                out.append(f"{name}: {kind}, {url}")
+            if rid in email:
+                out.append(f"{name}_email: {kind}, {email_url(s)}")
+            if rid in hook:
+                out.append(f"{name}_webhook: {kind}, "
+                           f"{webhook_url(s, name, cam)}")
     return "\n".join(out) + "\n"
 
 

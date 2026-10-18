@@ -29,6 +29,9 @@
     .nt-name { color: #fff; }
     .nt-icon { display: inline-block; width: 24px; }
     .nt-table select.nt-input.nt-layer { width: auto; padding: 4px 6px; display: inline-block; font-family: inherit; }
+    .nt-sub { display: block; margin-top: 4px; font-size: 12px; color: #8a8f98; white-space: nowrap; }
+    .nt-sub select.nt-input.nt-layer { font-size: 12px; padding: 2px 4px; max-width: 140px; }
+    .nt-foot { font-size: 12px; color: #8a8f98; margin: -6px 0 14px; }
     .nt-table select.nt-input { padding: 5px 8px; width: 120px; }
     .nt-table td input[type=checkbox] { vertical-align: middle; }
     .nt-na { color: var(--muted); }
@@ -54,6 +57,8 @@
         .nt-table th { padding: 0 4px 2px; font-size: 10px; letter-spacing: 0; }
         .nt-table th.nt-c, .nt-table td.nt-c { width: 30px; }
         .nt-table th.nt-img, .nt-table td.nt-img { width: 36px; }
+        .nt-sub { font-size: 11px; white-space: normal; }
+        .nt-sub select.nt-input.nt-layer { font-size: 11px; padding: 2px 2px; max-width: 126px; }
         /* Just wide enough for "Default" */
         .nt-table select.nt-input { width: auto; padding: 5px 2px; font-size: 12px; }
         .nt-icon { width: 20px; }
@@ -287,6 +292,7 @@
                 <tbody id="nt-rows"></tbody>
             </table>
         </div>
+        <div class="nt-foot">* Needs <b>Exclude objects</b> enabled in the slicer.</div>
         <div class="nt-grid" id="nt-filament">
             <div class="nt-field">
                 <label for="nt-fl-percent">🧵 Spool running low: alert when a spool is down to</label>
@@ -340,12 +346,20 @@
                 ? `<select class="nt-input nt-layer" id="nt-layers">${[1, 2, 3].map(n =>
                     `<option value="${n}"${n === state.layers_complete ? ' selected' : ''}>${['1st', '2nd', '3rd'][n - 1]}</option>`).join('')}</select>`
                 : '';
+            // Print-by-object: layer complete and print complete for each
+            // object, or once per print job
+            const byObject = { first_layer: ['nt-layer-objects', state.first_layer_objects],
+                               complete: ['nt-complete-objects', state.complete_objects] }[meta.id];
+            const objects = byObject
+                ? `<span class="nt-sub">Print-by-object mode: <select class="nt-input nt-layer" id="${byObject[0]}">${[['each', 'once per object *'], ['once', 'once per print job']].map(([v, t]) =>
+                    `<option value="${v}"${v === byObject[1] ? ' selected' : ''}>${t}</option>`).join('')}</select></span>`
+                : '';
             const image = meta.image
                 ? `<input type="checkbox" data-image="${meta.id}"${row.image ? ' checked' : ''}>`
                 : '<span class="nt-na">—</span>';
             if (meta.group === 'spoolman' && !state.meta.spoolman) return html;
             return html + `<tr data-row="${meta.id}">
-                <td><span class="nt-icon">${meta.icon}</span>${layer ? `${layer} <span class="nt-name">layer complete</span>` : `<span class="nt-name">${esc(meta.label)}</span>`}</td>
+                <td><span class="nt-icon">${meta.icon}</span>${layer ? `${layer} <span class="nt-name">layer complete</span>` : `<span class="nt-name">${esc(meta.label)}</span>`}${objects}</td>
                 <td class="nt-c nt-col-push"><input type="checkbox" data-enabled="${meta.id}"${row.enabled ? ' checked' : ''}></td>
                 <td class="nt-col-push"><select class="nt-input nt-dim-push" data-priority="${meta.id}">${prio}</select></td>
                 <td class="nt-c nt-col-email"><input type="checkbox" data-email="${meta.id}"${row.email ? ' checked' : ''}></td>
@@ -707,6 +721,8 @@
                 camera: el('nt-camera').value,
                 printer_url: el('nt-printer-url').value.trim(),
                 layers_complete: parseInt(el('nt-layers').value, 10) || 2,
+                first_layer_objects: el('nt-layer-objects').value,
+                complete_objects: el('nt-complete-objects').value,
                 filament_low_percent: parseInt(el('nt-fl-percent').value, 10) || 0,
                 filament_low_grams: parseInt(el('nt-fl-grams').value, 10) || 0,
                 email_enabled: emailEnabled,

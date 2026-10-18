@@ -50,6 +50,7 @@ import html
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -91,7 +92,7 @@ REMOTE_METHOD = "push_notification"
 MILESTONES = (25, 50, 75)
 ROW_IDS = (
     "started", "first_layer", "progress_25", "progress_50", "progress_75",
-    "paused", "resumed", "complete", "cancelled",
+    "paused", "resumed", "object_complete", "complete", "cancelled",
     "error", "warning", "shutdown", "power_loss",
     "filament_short", "filament_low", "spool_switch",
 )
@@ -103,6 +104,7 @@ TITLES = {
     "paused": "⏸️ {name} paused",
     "resumed": "▶️ {name} resumed",
     "recovered": "▶️ {name} resumed after power loss",
+    "object_complete": "📦 {name} object complete",
     "complete": "✅ {name} complete",
     "cancelled": "🚫 {name} cancelled",
     "error": "⚠️ {name} Error: {kind}",
@@ -147,7 +149,8 @@ RANK = {"green": 0, "orange": 1, "red": 2}
 BODY_LIMITS = {"pushover": (True, 1024), "ntfy": (False, 4000),
                "telegram": (True, 3500), "discord": (True, 3500)}
 # Discord's embed colour (Apprise notification type) for each notification
-NOTIFY_TYPES = {"complete": "success", "error": "failure",
+NOTIFY_TYPES = {"complete": "success", "object_complete": "success",
+                "error": "failure",
                 "warning": "failure", "shutdown": "failure",
                 "power_loss": "failure", "filament_short": "failure",
                 "cancelled": "warning", "paused": "warning",
@@ -156,7 +159,8 @@ FILE_CAP = 30
 # Emails about one print go in one thread (see _email_prepare). Faults
 # join it while printing and this long after the print ended.
 THREAD_ROWS = ("started", "first_layer", "progress_25", "progress_50",
-               "progress_75", "paused", "resumed", "complete", "cancelled",
+               "progress_75", "paused", "resumed", "object_complete",
+               "complete", "cancelled",
                "filament_short", "filament_low", "spool_switch")
 THREAD_FAULT_WINDOW = 120.
 NAME_CAP_MIN = 8
@@ -173,7 +177,7 @@ SEND_RETRY_DELAYS = (6, 10, 30)   # seconds before each retry of a failed send
 # notification an hour late is noise. Faults and complete never expire.
 URGENT_ROWS = ("error", "warning", "shutdown", "power_loss")
 EXPIRING_ROWS = ("started", "first_layer", "progress_25", "progress_50",
-                 "progress_75")
+                 "progress_75", "object_complete")
 STATUS_EXPIRY = 300.
 # Spoolman usage counts as tracked once spools lost this much; if nothing
 # was used by this far into the file, it isn't tracked and the filament
@@ -198,6 +202,13 @@ PL_CAMERA_POLL = 5.
 
 FaultKey = Tuple[Any, Any, Any]
 GCODE_EXTS = (".gcode", ".gco", ".g")
+# Print-by-object (Orca "print_sequence = by object"): the slicer's config
+# block at the end of the file says so, and its EXCLUDE_OBJECT markers tell
+# Klipper which object is being printed. Layer numbers run on across the
+# objects, so an object's own layer is counted from the layer it began on.
+CONFIG_TAIL = 256 * 1024
+RX_BY_OBJECT = re.compile(rb"^; *print_sequence *= *by object *$", re.M)
+RX_OBJECT_NAME = re.compile(r"^(.*?)_id_(\d+)_copy_(\d+)$")
 
 
 def shown(filename: str) -> str:
@@ -369,6 +380,9 @@ class PushNotifications:
         # "Layer N complete" is reported when layer N + 1 starts
         self.layers_complete: int = config.getint(
             "layers_complete", 2, minval=1, maxval=3)
+        # Print-by-object: "layer N complete" for each object, or once
+        self.first_layer_objects: str = config.get(
+            "first_layer_objects", "each")
         self.tz: Optional[datetime.tzinfo] = None
         tz_name = config.get("timezone", "")
         if tz_name:
@@ -467,8 +481,15 @@ class PushNotifications:
         self._milestones_sent: Set[int] = set()
         self._gcode_bytes: Tuple[Any, Any] = (None, None)
         self._job_filename = ""
+        # Print-by-object: the object being printed, the layer each began
+        # on, and the objects already reported
+        self._by_object = False
+        self._obj_cur: Optional[str] = None
+        self._obj_start: Dict[str, int] = {}
+        self._obj_first_sent: Set[str] = set()
         self._status: Dict[str, Dict[str, Any]] = {
-            "print_stats": {}, "virtual_sdcard": {}, "print_task_config": {}}
+            "print_stats": {}, "virtual_sdcard": {}, "print_task_config": {},
+            "exclude_object": {}}
 
         self.server.register_event_handler(
             "job_state:state_changed", self._on_job_event)
@@ -972,6 +993,19 @@ class PushNotifications:
         layer = ((self._status["print_stats"].get("info") or {})
                  .get("current_layer") or 0)
         self._first_layer_sent = int(layer) > self.layers_complete
+        self._by_object = await self.eventloop.run_in_thread(
+            self._is_by_object, filename)
+        self._obj_start = {}
+        self._obj_first_sent = set()
+        self._obj_cur = self._status["exclude_object"].get("current_object")
+        if self._obj_cur:
+            # Joined part-way through this object (power loss, Moonraker
+            # restart): its layers so far are unknown, so don't report them
+            self._obj_start[self._obj_cur] = -10 ** 6
+            self._obj_first_sent.add(self._obj_cur)
+        if self._by_object:
+            logging.info("[push_notifications] %s is printed by object",
+                         shown(filename))
         pct = self._progress() * 100.
         self._milestones_sent = {m for m in MILESTONES if m <= pct}
         if self._first_layer_sent or self._milestones_sent:
@@ -1104,7 +1138,9 @@ class PushNotifications:
             status = await kapis.subscribe_objects(
                 dict({"print_stats": ["state", "filename", "info",
                                       "print_duration"],
-                      "virtual_sdcard": ["progress", "file_position"]},
+                      "virtual_sdcard": ["progress", "file_position"],
+                      "exclude_object": ["objects", "current_object",
+                                         "excluded_objects"]},
                      **({"print_task_config": PTC_FIELDS}
                         if self._spoolman_active() else {})),
                 self._on_status_update, default={})
@@ -1136,7 +1172,9 @@ class PushNotifications:
         if not self._job_active or ps.get("state") != "printing":
             return
         filename = ps.get("filename") or ""
-        if "first_layer" in self.rows and not self._first_layer_sent:
+        if self._by_object:
+            self._track_objects(filename)
+        elif "first_layer" in self.rows and not self._first_layer_sent:
             layer = (ps.get("info") or {}).get("current_layer")
             if layer is not None and int(layer) > self.layers_complete:
                 self._first_layer_sent = True
@@ -1157,6 +1195,82 @@ class PushNotifications:
                         f"progress_{m}", self._title("progress", pct=m),
                         self._lines(shown(filename), self._time_left())))
                     break
+
+    def _is_by_object(self, filename: str) -> bool:
+        """Whether the slicer's config block (at the end of the file) says
+        the print job is by object. Runs in a thread: it reads the file."""
+        if not filename:
+            return False
+        try:
+            fm = self.server.lookup_component("file_manager")
+            path = os.path.join(fm.get_directory("gcodes"), filename)
+            with open(path, "rb") as f:
+                f.seek(max(0, os.path.getsize(path) - CONFIG_TAIL))
+                return RX_BY_OBJECT.search(f.read()) is not None
+        except Exception as e:
+            logging.warning("[push_notifications] could not read %s: %s",
+                            shown(filename), e)
+            return False
+
+    def _objects(self) -> List[str]:
+        return [str(o.get("name") or "") for o in
+                self._status["exclude_object"].get("objects") or []]
+
+    def _object_line(self, name: str) -> str:
+        """'Object 2 of 3: Assembly' for a notification body."""
+        objects = self._objects()
+        n = objects.index(name) + 1 if name in objects else 0
+        # Orca names objects <model>_id_<n>_copy_<m>; show the model, and
+        # a number when the same model is on the plate more than once
+        pretty = name
+        m = RX_OBJECT_NAME.match(name)
+        if m:
+            base = m.group(1)
+            same = [o for o in objects
+                    if (RX_OBJECT_NAME.match(o) or m).group(1) == base]
+            pretty = f"{base} #{same.index(name) + 1}" if len(same) > 1 \
+                else base
+        where = f"Object {n} of {len(objects)}" if n else "Object"
+        return f"{where}: {pretty}"
+
+    def _track_objects(self, filename: str) -> None:
+        """Print-by-object: report an object's first layers and its
+        completion. Layer numbers run on across the objects (Orca), so an
+        object's layer is counted from the layer it began on; a new object
+        beginning means the previous one is complete."""
+        ex = self._status["exclude_object"]
+        cur = ex.get("current_object") or None
+        layer = int((self._status["print_stats"].get("info") or {})
+                    .get("current_layer") or 0)
+        if cur and cur != self._obj_cur:
+            prev = self._obj_cur
+            self._obj_cur = cur
+            self._obj_start.setdefault(cur, layer)
+            if prev is not None and prev != cur and \
+                    prev not in (ex.get("excluded_objects") or []):
+                self._object_done(prev, filename)
+        cur = self._obj_cur
+        if not cur or "first_layer" not in self.rows or \
+                cur in self._obj_first_sent:
+            return
+        if self.first_layer_objects != "each" and self._first_layer_sent:
+            return
+        if layer - self._obj_start.get(cur, layer) >= self.layers_complete:
+            self._obj_first_sent.add(cur)
+            self._first_layer_sent = True
+            self._spawn(self._send(
+                "first_layer",
+                self._title("first_layer",
+                            ordinal=ORDINALS[self.layers_complete]),
+                self._lines(shown(filename), self._object_line(cur))))
+
+    def _object_done(self, name: str, filename: str) -> None:
+        if "object_complete" not in self.rows:
+            return
+        self._spawn(self._send(
+            "object_complete", self._title("object_complete"),
+            self._lines(shown(filename), self._object_line(name),
+                        self._time_left())))
 
     def _get_gcode_bytes(self, filename: str) -> Tuple[Any, Any]:
         if not filename:

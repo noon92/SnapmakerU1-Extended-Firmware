@@ -95,9 +95,15 @@ class Meta:
         return dict(META)
 
 
+GCODES = tempfile.mkdtemp(prefix="gcodes_", dir=WORK)
+
+
 class FileManager:
     def get_metadata_storage(self):
         return Meta()
+
+    def get_directory(self, root):
+        return GCODES
 
 
 class Klippy:
@@ -453,6 +459,70 @@ async def test_filament_measured():
           c._need_now(1) is None)
 
 
+async def test_print_by_object():
+    print("Print by object: layer and object notifications")
+    reset_world()
+    objects = [f"Assembly_id_{i}_copy_0" for i in range(3)]
+    STATE["exclude_object"] = {"objects": [{"name": o} for o in objects],
+                               "current_object": None,
+                               "excluded_objects": []}
+    # Layers run on across the objects, as Orca writes them: 81 each
+    tail = "; CONFIG_BLOCK_START\n; print_sequence = by object\n; x = 1\n"
+    with open(os.path.join(GCODES, "Assembly.gcode"), "w") as f:
+        f.write("; gcode\nG28\n" * 2000 + tail)
+    with open(os.path.join(GCODES, "Benchy.gcode"), "w") as f:
+        f.write("; gcode\n" + tail.replace("by object", "by layer"))
+
+    async def run(filename, mode):
+        log = []
+        ntfy = FakeService(log, "ntfy")
+        server, c = make({"first_layer_objects": mode},
+                         {"first_layer": [("ntfy", ntfy, False)],
+                          "object_complete": [("ntfy", ntfy, False)]})
+        await start_job(server, filename)
+        for layer in range(1, 244):
+            # The layer line comes just before the object marker, and the
+            # two may arrive in one update or separately
+            obj = objects[(layer - 1) // 81]
+            STATE["print_stats"]["info"] = {"current_layer": layer}
+            await c._on_status_update(
+                {"virtual_sdcard": {"file_position": 1000 + 41 * layer}}, 0)
+            if layer % 2:
+                await c._on_status_update(
+                    {"print_stats": {"info": {"current_layer": layer}}}, 0)
+                await c._on_status_update(
+                    {"exclude_object": {"current_object": obj}}, 0)
+            else:
+                await c._on_status_update(
+                    {"print_stats": {"info": {"current_layer": layer}},
+                     "exclude_object": {"current_object": obj}}, 0)
+            await c._on_status_update(
+                {"exclude_object": {"current_object": None}}, 0)
+        await asyncio.sleep(0.3)
+        return c, [(e["title"].split(" ", 2)[2], e["body"]) for e in log]
+
+    c, sent = await run("Assembly.gcode", "each")
+    check("by-object print job is recognised", c._by_object)
+    layers = [b for t, b in sent if t.startswith("2nd layer")]
+    check("layer complete once per object, from the object's own layers",
+          len(layers) == 3 and "Object 2 of 3: Assembly #2" in layers[1],
+          layers)
+    done = [b for t, b in sent if t == "object complete"]
+    check("object complete for each finished object, not the last",
+          len(done) == 2 and "Object 1 of 3: Assembly #1" in done[0]
+          and "Object 2 of 3" in done[1], done)
+    check("object complete says how long is left",
+          done and "left" in done[0], done[:1])
+    c, sent = await run("Assembly.gcode", "once")
+    check("or once per print job",
+          [t for t, _ in sent if t.startswith("2nd")] == ["2nd layer complete"]
+          and len([t for t, _ in sent if t == "object complete"]) == 2)
+    c, sent = await run("Benchy.gcode", "each")
+    check("a by-layer print job ignores the object markers",
+          not c._by_object and [t for t, _ in sent] == ["2nd layer complete"],
+          sent)
+
+
 async def test_no_secrets_in_logs():
     print("No tokens in the log")
     import logging
@@ -507,6 +577,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
+              test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:
             await t()
@@ -553,6 +624,17 @@ def run_config_tests():
     moon = nc.render_moonraker(s)
     check("Moonraker config lists the enabled notifications",
           "started: render, ntfys://ntfy.example.com/u1" in moon)
+    check("print-by-object: object complete follows the Print complete row",
+          "object_complete: snapshot, ntfys://" in moon
+          and "first_layer_objects: each" in moon
+          and "complete_objects: each" in moon)
+    s["complete_objects"] = "once"
+    check("or is left out when complete is once per print job",
+          "object_complete" not in nc.render_moonraker(s))
+    s["complete_objects"] = "each"
+    bad(dict(provider="ntfy", server="https://ntfy.example.com", topic="u1",
+             first_layer_objects="sometimes"),
+        "rejects a bad print-by-object setting")
     check("ntfy buttons from the printer URL",
           "view%2C%20Web%20UI%2C%20http%3A%2F%2Fu1%2F" in moon)
     klip = nc.render_klipper(s)

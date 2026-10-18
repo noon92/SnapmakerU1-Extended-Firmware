@@ -17,10 +17,10 @@ server), and/or to a webhook for home automation.
 | Notification | Image | Notes |
 |---|---|---|
 | ▶️ Print started | Model preview | The slicer thumbnail, and the slicer's estimated print time and ETA |
-| 🔍 1st / 2nd / 3rd layer complete | Camera | Choose after which layer (default: 2nd) |
+| 🔍 1st / 2nd / 3rd layer complete | Camera | Choose after which layer (default: 2nd). When printing by object (Orca's *print sequence: by object*), once per object, counted from the object's own first layer, or once per print job |
 | ⏳ 25% / 50% / 75% complete | Camera | Same percentage as Fluidd and the Snapmaker app, with time left and ETA |
 | ⏸️ Paused / ▶️ Resumed | Camera | Resumed includes time left and ETA |
-| ✅ Print complete | Camera | Includes print time |
+| ✅ Print complete | Camera | Includes print time. When printing by object: once per object as each one finishes and the next begins ("📦 object complete", with which object, e.g. "Object 2 of 3: Assembly", and time left; the last object's is the Print complete notification itself), or once per print job |
 | 🚫 Cancelled | Camera | |
 | ⚠️ Error | Camera | Faults that pause or stop a print, e.g. filament runout or a dirty bed |
 | ⚠️ Warning | Camera | Faults that don't stop a print, e.g. a toolhead contact warning |
@@ -245,6 +245,10 @@ notification as their subject.
   (the default for the internal camera, see [Camera Support](camera_support.md)).
 - For *Layer complete*, the slicer must emit `SET_PRINT_STATS_INFO`
   layer information (the Snapmaker U1 Orca profile includes it).
+- For print-by-object (*Layer complete* and *Print complete* for each
+  object), the slicer's **Exclude objects** (label objects) setting must
+  be on, so the G-code marks each object (Snapmaker Orca has it on by
+  default). The print sequence is read from the file's config block.
 
 ## Setup
 
@@ -331,6 +335,8 @@ printer_url: http://100.64.0.10
 camera: internal
 name: U1
 layers_complete: 2
+first_layer_objects: each    # when printing by object: each | once
+complete_objects: each
 email_enabled: true
 email_host: smtp.gmail.com
 email_port: 587

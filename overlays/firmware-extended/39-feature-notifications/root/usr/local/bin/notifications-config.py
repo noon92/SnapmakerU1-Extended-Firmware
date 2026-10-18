@@ -1077,6 +1077,8 @@ def telegram_find_chat(s):
     if not s["push_enabled"] or s["provider"] != "telegram" or \
             s["telegram_chat"] or not s["secret"]:
         return
+    print("Looking up the Telegram chat (the latest message your bot "
+          "received)...", flush=True)
     url = f"{TELEGRAM_API}{s['secret']}/getUpdates"
     try:
         with urllib.request.urlopen(url, timeout=15) as resp:
@@ -1227,6 +1229,7 @@ def discord_find_user(s):
     if not s["push_enabled"] or s["provider"] != "discord_dm" or \
             not s["secret"]:
         return
+    print("Checking the Discord bot...", flush=True)
     d = discord_module()
     app, why = d.bot_info(s["secret"])
     if app is None:

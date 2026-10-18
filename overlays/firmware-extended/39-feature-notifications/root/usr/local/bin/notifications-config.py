@@ -738,7 +738,8 @@ def render_moonraker(s):
         out.append(f"snapshot_url: {SNAPSHOT_HOST}{SNAPSHOT_PATH[s['camera']]}")
     out.append(f"layers_complete: {s['layers_complete']}")
     out.append(f"first_layer_objects: {s['first_layer_objects']}")
-    out.append(f"complete_objects: {s['complete_objects']}")
+    # complete_objects isn't a component option: it decides whether the
+    # object_complete rows below exist
     if s["timezone"]:
         out.append(f"timezone: {s['timezone']}")
     if any(r in rows for r in SPOOLMAN_ROWS):

@@ -18,6 +18,7 @@ import email
 import importlib.util
 import json
 import os
+import re
 import shutil
 import smtplib
 import sys
@@ -628,10 +629,20 @@ def run_config_tests():
     moon = nc.render_moonraker(s)
     check("Moonraker config lists the enabled notifications",
           "started: render, ntfys://ntfy.example.com/u1" in moon)
+    known = set(re.findall(r'config\.get(?:int|float|boolean)?\(\s*"(\w+)"',
+                           open(os.path.join(COMPONENTS,
+                                             "push_notifications.py")).read()))
+    keys = {ln.split(":")[0] for ln in moon.splitlines()
+            if ln and not ln.startswith(("#", "[")) and ":" in ln}
+    rows = {k for k in keys if k.split("_email")[0].split("_webhook")[0]
+            in pn.ROW_IDS}
+    check("every generated option is one the component reads "
+          "(Moonraker warns about the rest)", keys - rows <= known,
+          sorted(keys - rows - known))
     check("print-by-object: object complete follows the Print complete row",
           "object_complete: snapshot, ntfys://" in moon
           and "first_layer_objects: each" in moon
-          and "complete_objects: each" in moon)
+          and "complete_objects" not in moon)
     s["complete_objects"] = "once"
     check("or is left out when complete is once per print job",
           "object_complete" not in nc.render_moonraker(s))

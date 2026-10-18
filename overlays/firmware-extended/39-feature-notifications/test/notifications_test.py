@@ -86,6 +86,7 @@ pn.FILAMENT_POLL = 0.2
 STATE = {}
 META = {}
 SPOOLS = {}
+SECRETS = {}
 
 
 class Loop:
@@ -179,6 +180,16 @@ class Config:
 
     def getfloat(self, key, default=None, **_kw):
         return float(self.values.get(key, default))
+
+    def gettemplate(self, key, default=None, **_kw):
+        # Moonraker renders {secrets.<section>.<name>} from its secrets file
+        value = str(self.values.get(key, default))
+
+        class T:
+            def render(self_):
+                return re.sub(r"\{secrets\.notifications\.(\w+)\}",
+                              lambda m: SECRETS.get(m.group(1), ""), value)
+        return T()
 
 
 # ---- fake services ---------------------------------------------------------
@@ -697,6 +708,18 @@ async def test_config_lines():
     channels = [d.channel for d in c.rows["complete"][1]]
     check("push, email and webhook for one notification",
           channels == ["ntfy", "email", "webhook"], channels)
+    SECRETS.update(push_token="tk_real", webhook="jsons://u:p@h.example.com/x")
+    c = pn.PushNotifications(Config(Server(), dict(
+        name="U1",
+        complete="snapshot, ntfys://ntfy.example.com/u1?priority=default"
+                 "&token={secrets.notifications.push_token}",
+        complete_webhook="snapshot, {secrets.notifications.webhook}"
+                         "?:event=complete")))
+    urls = [str(list(d.ap)[0].url(privacy=False))
+            for d in c.rows["complete"][1]]
+    check("secrets templates are rendered from Moonraker's secrets file",
+          "tk_real" in urls[0] and "h.example.com" in urls[1], urls)
+    SECRETS.clear()
 
 
 async def run_component_tests():
@@ -725,6 +748,7 @@ def run_config_tests():
     with open(os.path.join(cfgdir, "extended2.cfg"), "w") as f:
         f.write("[spoolman]\nhost: http://spoolman:7912\n")
     os.environ["NOTIFICATIONS_ROOT"] = cfgdir
+    os.environ["NOTIFICATIONS_SECRETS"] = os.path.join(cfgdir, "moonraker.secrets")
     os.environ["NOTIFICATIONS_COMPONENTS"] = COMPONENTS
     spec = importlib.util.spec_from_file_location("nc", CONFIG_TOOL)
     nc = importlib.util.module_from_spec(spec)
@@ -836,7 +860,15 @@ def run_config_tests():
           wurl)
     check("webhook is added alongside the push service",
           "\ncomplete: snapshot, ntfys://" in wmoon
-          and "\ncomplete_webhook: snapshot, jsons://" in wmoon)
+          and "\ncomplete_webhook: snapshot, {secrets.notifications.webhook}"
+          in wmoon, wmoon)
+    bag = nc.SecretBag()
+    nc.render_moonraker(w, bag)
+    check("the webhook address (it may hold a token) is a secret",
+          bag.values["webhook"] == "jsons://u:p@hooks.example.com/x/abc?-k=1"
+          and "hooks.example.com" not in wmoon, bag.values)
+    check("no token, password or webhook address in the generated config",
+          "tk_" not in wmoon and "abc" not in wmoon)
     check("webhook gets notifications that push and email don't",
           "progress_25_webhook:" in wmoon and "\nprogress_25:" not in wmoon)
     hook_only = nc.validate(dict(enabled=True, push_enabled=False,
@@ -857,6 +889,102 @@ def run_config_tests():
     check("older settings: provider none means push off",
           not nc.load_from({"provider": "none", "enabled": "true"})
           ["push_enabled"])
+    # Secrets: Moonraker's secrets file, not extended2.cfg
+    tok = nc.validate(dict(enabled=True, provider="ntfy",
+                           server="https://ntfy.example.com", topic="u1",
+                           auth="token", secret="tk_secret123"), nc.load())
+    bag = nc.SecretBag()
+    tmoon = nc.render_moonraker(tok, bag)
+    check("ntfy token: a template in the config, the value in the bag",
+          "token={secrets.notifications.push_token}" in tmoon
+          and bag.values["push_token"] == "tk_secret123", tmoon)
+    nc.store(tok)
+    nc.write_secrets(dict(bag.values, secret=tok["secret"],
+                          secret_for=tok["secret_for"]))
+    cfg_text = open(nc.EXTENDED_CFG).read()
+    sec_text = open(nc.SECRETS_FILE).read()
+    check("extended2.cfg holds no secret; the secrets file does, mode 0600",
+          "tk_secret123" not in cfg_text and "tk_secret123" in sec_text
+          and oct(os.stat(nc.SECRETS_FILE).st_mode & 0o777) == "0o600")
+    back = nc.load()
+    check("the secret is loaded back from the secrets file",
+          back["secret"] == "tk_secret123"
+          and back["secret_for"] == "ntfy|token|https://ntfy.example.com|",
+          (back["secret"], back["secret_for"]))
+    sw = nc.validate(dict(enabled=False, push_enabled=False,
+                          provider="pushover"), back)
+    check("switching services drops the stored secret (never replayed to "
+          "another host)", sw["secret"] == "" and not sw["secret_for"])
+    try:
+        nc.validate(dict(provider="pushover", pushover_user="u" * 30), back)
+        check("...and asks for the new service's own token", False)
+    except nc.ConfigError as e:
+        check("...and asks for the new service's own token",
+              "another service or server" in str(e), str(e))
+    try:
+        nc.validate(dict(server="https://other.example.com"), back)
+        check("so does another ntfy server", False)
+    except nc.ConfigError as e:
+        check("so does another ntfy server",
+              "another service or server" in str(e), str(e))
+    same = nc.validate(dict(topic="u2"), back)
+    check("the same service keeps it", same["secret"] == "tk_secret123")
+    nc.write_secrets({})
+    # Save & Apply: what restarts, and what a running print job forbids
+    import io as _io
+    import contextlib
+    calls = []
+    nc.subprocess.call = lambda argv: calls.append(os.path.basename(argv[0])) or 0
+    nc.enter_test_cgroup = lambda: None
+    nc.apprise_check = lambda s: None
+    nc.MOONRAKER_CFG = os.path.join(cfgdir, "moonraker", "notifications.cfg")
+    nc.KLIPPER_CFG = os.path.join(cfgdir, "klipper", "notifications.cfg")
+    nc.PENDING_RESTART = {k: os.path.join(cfgdir, f".restart-{k}")
+                          for k in ("moonraker", "klipper")}
+    base = dict(enabled=True, provider="ntfy", auth="none",
+                server="https://ntfy.example.com", topic="u1")
+
+    def save(data, busy=False):
+        calls.clear()
+        nc.read_stdin_json = lambda: data
+        nc.printer_busy = lambda: busy
+        out = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = nc.cmd_save()
+        except nc.ConfigError as e:
+            return "ERROR", str(e)
+        return rc, out.getvalue()
+    rc, out = save(base)
+    check("first save restarts Klipper (hooks) then Moonraker",
+          rc == 0 and calls == ["S60klipper", "S61moonraker"], (rc, calls, out))
+    rc, out = save(dict(base, rows={"started": {"enabled": False}}),
+                   busy=True)
+    check("mid-print: a row change restarts Moonraker only, print carries on",
+          rc == 0 and calls == ["S61moonraker"] and "carries on" in out,
+          (rc, calls, out))
+    rc, out = save(dict(base, rows={"complete": {"image": False},
+                                    "paused": {"enabled": False}}),
+                   busy=True)
+    check("mid-print: a print-end macro change is refused, naming it",
+          rc == "ERROR" and "Print complete (image)" in out
+          and "Nothing was saved" in out, (rc, out))
+    rc, out = save(dict(base, rows={"complete": {"priority": "high"}}),
+                   busy=True)
+    check("mid-print: a print-end row change that leaves the macros alone "
+          "is fine", rc == 0 and calls == ["S61moonraker"], (rc, calls, out))
+    nc.subprocess.call = lambda argv: 1
+    rc, out = save(dict(base, name="U1b"))
+    check("a failed restart is owed", rc != 0
+          and os.path.exists(nc.PENDING_RESTART["moonraker"]), (rc, out))
+    nc.subprocess.call = lambda argv: calls.append(os.path.basename(argv[0])) or 0
+    rc, out = save(dict(base, name="U1b"))
+    check("...and done on the next save even with nothing changed",
+          rc == 0 and calls == ["S61moonraker"], (rc, calls, out))
+    rc, out = save(dict(base, name="U1b"))
+    check("nothing owed, nothing changed: no restart",
+          rc == 0 and calls == [], (rc, calls, out))
+
     check("Discord: mention only on high/max",
           "ping=everyone" in nc.row_url(d, "error", "max", True)
           and "ping" not in nc.row_url(d, "complete", "default", True))

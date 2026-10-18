@@ -450,7 +450,7 @@ class PushNotifications:
             dests: List[Destination] = []
             for key, email in ((rid, False), (f"{rid}_email", True),
                                (f"{rid}_webhook", False)):
-                value = config.get(key, None)
+                value = self._option(config, key)
                 if not value:
                     continue
                 kind, _, url = value.partition(",")
@@ -519,6 +519,19 @@ class PushNotifications:
             for rid, (_, dests) in self.rows.items()) or "none")
 
     # ---- helpers -------------------------------------------------------
+
+    @staticmethod
+    def _option(config: ConfigHelper, key: str) -> Optional[str]:
+        """An option as a template: the URLs refer to their tokens and
+        passwords as {secrets.notifications.<name>}, kept in Moonraker's
+        secrets file (never served or logged) by notifications-config.py."""
+        if config.get(key, None) is None:
+            return None
+        try:
+            return str(config.gettemplate(key).render()).strip()
+        except Exception as e:
+            raise config.error(f"[{config.get_name()}] {key}: {e}")
+
 
     def _spawn(self, coro: Awaitable) -> None:
         task = self.eventloop.create_task(coro)

@@ -67,6 +67,7 @@
 
 <div class="nt" id="nt-root">
     <label class="nt-enable"><input type="checkbox" id="nt-enabled"> Enable notifications</label>
+    <div class="nt-public" id="nt-stored-error" style="display:none; margin: -8px 0 16px"></div>
 
     <div class="nt-body">
         <div class="nt-section">Push notifications</div>
@@ -379,12 +380,13 @@
     function updateRowDimming() {
         const push = el('nt-push-enabled').checked;
         const email = el('nt-email-enabled').checked;
+        const hook = el('nt-wh-enabled').checked;   // gets every row
         el('nt-rows').querySelectorAll('tr[data-row]').forEach(tr => {
             const id = tr.dataset.row;
             const p = push && tr.querySelector(`[data-enabled="${id}"]`).checked;
             const e = email && tr.querySelector(`[data-email="${id}"]`).checked;
             tr.classList.toggle('nt-nopush', !p);
-            tr.classList.toggle('nt-off', !p && !e);
+            tr.classList.toggle('nt-off', !p && !e && !hook);
         });
         el('nt-table').classList.toggle('nt-no-push', !push);
         el('nt-table').classList.toggle('nt-no-email', !email);
@@ -561,8 +563,14 @@
             const updateWebhook = () => {
                 el('nt-webhook').style.display = el('nt-wh-enabled').checked ? '' : 'none';
             };
-            el('nt-wh-enabled').onchange = updateWebhook;
+            el('nt-wh-enabled').onchange = () => { updateWebhook(); updateRowDimming(); };
             updateWebhook();
+            // Saved settings that no longer pass validation (e.g. after an
+            // update): the last generated config stays until they're fixed
+            el('nt-stored-error').textContent = data.meta.stored_error
+                ? `The saved settings need attention: ${data.meta.stored_error}. Notifications keep the last applied settings until this is saved again.`
+                : '';
+            el('nt-stored-error').style.display = data.meta.stored_error ? '' : 'none';
             el('nt-fl-percent').value = data.filament_low_percent;
             el('nt-fl-grams').value = data.filament_low_grams;
             el('nt-filament').style.display = data.meta.spoolman ? '' : 'none';
@@ -688,7 +696,7 @@
                     throw new Error('On the public ntfy.sh server use a topic of at least 16 characters (Random creates one).');
                 }
                 if (enabled && !topic) throw new Error('Enter a topic.');
-                secret = el('nt-secret').value;
+                secret = el('nt-secret').value.trim();
                 if (auth !== 'none' && !secret && !(keepSecret && auth === state.auth)) {
                     throw new Error(auth === 'token' ? 'Enter the access token.' : 'Enter the password.');
                 }

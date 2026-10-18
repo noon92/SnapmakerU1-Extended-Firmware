@@ -48,7 +48,7 @@ errors by push and email. By default, faults and power loss are also emailed.
   (e.g. `Possible Spaghetti Defect Detected`), and an **Error Index** link to the
   [U1 error code reference](https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/u1_error_codes).
 - **Snapshots before parking**: For *Print complete* and *Cancelled*, the
-  snapshot is taken once the nozzle has lifted 15 mm off the part, while the
+  snapshot is taken once the nozzle has retracted 1 mm and lifted 15 mm off the part, while the
   printer's own end/cancel moves carry on, so the image shows the part and the
   nozzle doesn't stop over it and ooze onto it. There is no lift if Z is
   not homed, and the lift is reduced near the top of the build volume so the
@@ -309,11 +309,16 @@ Klipper (**Actions**) or reboot.
 - Telegram and Discord bot tokens and the Discord webhook URL let anyone
   who has them send messages as the bot. If one leaks, reset it (BotFather
   `/revoke`, Developer Portal **Reset Token**, or delete the webhook).
-- Tokens and passwords are stored in `extended2.cfg` and in the generated
-  Moonraker configuration. Anyone with access to Fluidd/Mainsail or the
-  Moonraker API can read them (e.g. via the config file browser or
-  `/server/config`). Enable **Web Authentication** under
-  **Settings > Remote Access** if your network isn't trusted.
+- Tokens, passwords and the webhook address are kept in Moonraker's
+  secrets file (`/home/lava/printer_data/moonraker.secrets`, readable by
+  Moonraker only), not in `extended2.cfg` or the generated config, which
+  refer to them as `{secrets.notifications.…}`. Moonraker never serves,
+  logs or backs up that file. Anyone who can reach Firmware Config can
+  still change where notifications go, so enable **Web Authentication**
+  under **Settings > Remote Access** if your network isn't trusted.
+- A saved token is only reused for the service and server it was entered
+  for: switching the push service, or the ntfy server, asks for the new
+  one, so a token is never sent to another host.
 
 ## Configuration File
 
@@ -333,19 +338,20 @@ pushover_device:
 telegram_chat:
 discord_user:
 discord_mention:
-secret: tk_...
+secret:                      # kept in moonraker.secrets, see Security
 printer_url: http://100.64.0.10
 camera: internal
 name: U1
 layers_complete: 2
-first_layer_objects: each    # when printing by object: each | once
+# When printing by object: each | once
+first_layer_objects: each
 complete_objects: each
 email_enabled: true
 email_host: smtp.gmail.com
 email_port: 587
 email_security: starttls
 email_username: you@gmail.com
-email_password: abcd efgh ijkl mnop
+email_password:              # kept in moonraker.secrets
 email_from: you@gmail.com
 email_to: you@gmail.com
 webhook_enabled: false
@@ -367,7 +373,19 @@ Klipper start):
 - `extended/klipper/notifications.cfg`: the `_PRINT_END_NTFY` and
   `_CANCEL_PRINT_NTFY` [print hooks](klipper_hooks.md).
 
-Don't edit the generated files; they are overwritten. For other services
+Don't edit the generated files; they are overwritten.
+
+**Save & Apply** restarts only the service whose generated file changed.
+Moonraker can restart during a print job (the print carries on; Fluidd
+reconnects), so rows, priorities, images and services can be changed any
+time. Klipper only reads its config at start, so a change to what the
+print-end macros do (*Print complete*, *Print cancelled* and *Error*: on
+or off, email, camera image; the camera, or enabling notifications, push,
+email or the webhook) is refused while printing, naming the settings, and
+nothing is saved until the print job ends. A restart that fails is done on
+the next Save & Apply.
+
+For other services
 (Slack, Matrix, etc.), add your own Moonraker
 [`[notifier]`](https://moonraker.readthedocs.io/en/latest/configuration/#notifier)
 section in a separate file in `extended/moonraker/` (see
@@ -376,7 +394,8 @@ section in a separate file in `extended/moonraker/` (see
 ## Troubleshooting
 
 - **Nothing arrives**: use **Send Test** first. Then check
-  `/userdata/logs/moonraker.log` for lines starting with `[push_notifications]`.
+  `/home/lava/printer_data/logs/moonraker.log` for lines starting with
+  `[push_notifications]`.
   Each notification is logged per service, e.g. `error (email): sent`, or as
   `attempt N failed` for each retry and `send failed after 4 attempts` (with
   the service's error just before each). A notification that was

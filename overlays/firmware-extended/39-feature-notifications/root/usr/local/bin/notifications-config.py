@@ -17,6 +17,7 @@
 # hooks, so generated files always match extended2.cfg and the firmware.
 
 import configparser
+import io
 import json
 import os
 import re
@@ -35,6 +36,15 @@ KLIPPER_CFG = os.path.join(ROOT, "klipper", "notifications.cfg")
 MOONRAKER_URL = os.environ.get("NOTIFICATIONS_MOONRAKER", "http://127.0.0.1:7125")
 INIT_D = os.environ.get("NOTIFICATIONS_INIT_D", "/etc/init.d")
 SNAPSHOT_HOST = os.environ.get("NOTIFICATIONS_SNAPSHOT_HOST", "http://127.0.0.1")
+# Secrets (tokens, passwords) live in Moonraker's secrets file, which it
+# never serves or logs, as {secrets.notifications.<name>} templates in the
+# generated config; extended2.cfg (served by Moonraker) holds none.
+SECRETS_FILE = os.environ.get("NOTIFICATIONS_SECRETS",
+                              "/home/lava/printer_data/moonraker.secrets")
+SECRETS_SECTION = "notifications"
+# A restart that was skipped or failed is owed: done on the next save
+PENDING_RESTART = {"moonraker": os.path.join(ROOT, ".notifications-restart-moonraker"),
+                   "klipper": os.path.join(ROOT, ".notifications-restart-klipper")}
 SECTION = "notifications"
 COMPONENT = "push_notifications"
 REMOTE_METHOD = "push_notification"
@@ -132,7 +142,7 @@ RX_DISCORD_ID = re.compile(r"\d{5,25}")
 RX_DISCORD_MENTION = re.compile(r"|\d{5,25}|role:\d{5,25}|everyone|here")
 RX_WEBHOOK = re.compile(r"https?://[^\s]{3,2000}")
 RX_PRINTER_URL = re.compile(r"https?://[A-Za-z0-9.\-\[\]:]+(/[^\s]*)?")
-RX_NAME = re.compile(r"[A-Za-z0-9 _.()\-]{1,32}")
+RX_NAME = re.compile(r"[\w .()\-]{1,32}")     # \w: letters in any script
 RX_TIMEZONE = re.compile(r"[A-Za-z0-9_+\-/]{0,64}")
 RX_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 RX_HOST = re.compile(r"[A-Za-z0-9.\-]{1,253}")
@@ -181,6 +191,7 @@ def defaults():
         "discord_user": "",
         "discord_mention": "",
         "secret": "",
+        "secret_for": "",       # the service the push secret belongs to
         "printer_url": "",
         "camera": "internal",
         "name": "U1",
@@ -217,8 +228,117 @@ def read_cfg():
     return cfg
 
 
+def read_secrets_file():
+    """(values of our section, the whole file's data, its format) from
+    Moonraker's secrets file: INI (sections) or JSON (objects)."""
+    try:
+        with open(SECRETS_FILE) as f:
+            text = f.read()
+    except OSError:
+        return {}, None, "ini"
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            sec = data.get(SECRETS_SECTION) or {}
+            return ({k: str(v) for k, v in sec.items()}
+                    if isinstance(sec, dict) else {}), data, "json"
+    except ValueError:
+        pass
+    cfg = configparser.RawConfigParser(strict=False, interpolation=None)
+    try:
+        cfg.read_string(text)
+    except configparser.Error:
+        return {}, None, "ini"
+    sec = dict(cfg[SECRETS_SECTION]) if cfg.has_section(SECRETS_SECTION) \
+        else {}
+    return sec, cfg, "ini"
+
+
+def write_secrets(values):
+    """Replace our section of Moonraker's secrets file (0600, owned by
+    Moonraker's user); other sections are kept. Empty removes it."""
+    _, data, kind = read_secrets_file()
+    values = {k: v for k, v in (values or {}).items() if v}
+    if kind == "json" and isinstance(data, dict):
+        if values:
+            data[SECRETS_SECTION] = values
+        else:
+            data.pop(SECRETS_SECTION, None)
+        text = json.dumps(data, indent=2) + "\n"
+    else:
+        cfg = data if isinstance(data, configparser.RawConfigParser) \
+            else configparser.RawConfigParser(strict=False, interpolation=None)
+        if cfg.has_section(SECRETS_SECTION):
+            cfg.remove_section(SECRETS_SECTION)
+        if values:
+            cfg.add_section(SECRETS_SECTION)
+            for k, v in values.items():
+                cfg.set(SECRETS_SECTION, k, v)
+        if not cfg.sections():
+            text = ""
+        else:
+            buf = io.StringIO()
+            cfg.write(buf)
+            text = buf.getvalue()
+    old = None
+    try:
+        with open(SECRETS_FILE) as f:
+            old = f.read()
+    except OSError:
+        pass
+    if old == text or (not text and old is None):
+        return False
+    if not text:
+        os.remove(SECRETS_FILE)
+        return True
+    tmp = SECRETS_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o600)
+    chown_lava(tmp)
+    os.replace(tmp, SECRETS_FILE)
+    return True
+
+
+def chown_lava(path):
+    try:
+        import pwd
+        pw = pwd.getpwnam("lava")
+        os.chown(path, pw.pw_uid, pw.pw_gid)
+    except (KeyError, PermissionError, ImportError, OSError):
+        pass
+
+
+class SecretBag:
+    """Collects the secrets a generated config refers to by template; the
+    plain one hands them back as they are (for Send Test)."""
+
+    def __init__(self, plain=False):
+        self.values = {}
+        self.plain_values = plain
+
+    @classmethod
+    def plain(cls):
+        return cls(plain=True)
+
+    def put(self, name, value):
+        if self.plain_values:
+            return value
+        self.values[name] = value
+        return "{secrets.%s.%s}" % (SECRETS_SECTION, name)
+
+
 def load():
-    return load_from(read_cfg())
+    s = load_from(read_cfg())
+    # Secrets come from Moonraker's secrets file; a value still in
+    # extended2.cfg (older settings) is taken until the next save moves it
+    stored, _, _ = read_secrets_file()
+    for key in SECRET_FIELDS:
+        if stored.get(key):
+            s[key] = stored[key]
+    s["secret_for"] = stored.get("secret_for", s.get("secret_for", ""))
+    return s
 
 
 def load_from(cfg):
@@ -297,7 +417,7 @@ def section_lines(s):
         f"telegram_chat: {s['telegram_chat']}",
         f"discord_user: {s['discord_user']}",
         f"discord_mention: {s['discord_mention']}",
-        f"secret: {s['secret']}",
+        "secret:",
         f"printer_url: {s['printer_url']}",
         f"camera: {s['camera']}",
         f"name: {s['name']}",
@@ -313,11 +433,11 @@ def section_lines(s):
         f"email_port: {s['email_port']}",
         f"email_security: {s['email_security']}",
         f"email_username: {s['email_username']}",
-        f"email_password: {s['email_password']}",
+        "email_password:",
         f"email_from: {s['email_from']}",
         f"email_to: {s['email_to']}",
         f"webhook_enabled: {'true' if s['webhook_enabled'] else 'false'}",
-        f"webhook_url: {s['webhook_url']}",
+        "webhook_url:",
         "# <notification>: on|off (push), <priority>, image|no_image, "
         "email|no_email",
     ]
@@ -331,9 +451,8 @@ def section_lines(s):
 
 
 def store(s):
-    """Replace the [notifications] block (which never contains blank
-    lines, matching extended-config.py's section rules). Written in place
-    so the file keeps its owner and mode."""
+    """Replace the [notifications] block. Secrets aren't written here:
+    they go to Moonraker's secrets file (write_secrets)."""
     with open(EXTENDED_CFG, "r") as f:
         lines = f.readlines()
     header = re.compile(rf"^\s*\[\s*{SECTION}\s*\]\s*$")
@@ -347,13 +466,24 @@ def store(s):
             lines.append("\n")
         lines.extend(block)
     else:
+        # Up to the next section header: configparser reads on past a
+        # blank line, so a stray line there would otherwise survive
         end = start + 1
-        while end < len(lines) and lines[end].strip() and \
-                not any_header.match(lines[end]):
+        while end < len(lines) and not any_header.match(lines[end]):
             end += 1
+        while end > start + 1 and not lines[end - 1].strip():
+            end -= 1
         lines[start:end] = block
-    with open(EXTENDED_CFG, "w") as f:
+    tmp = EXTENDED_CFG + ".tmp"
+    st = os.stat(EXTENDED_CFG)
+    with open(tmp, "w") as f:
         f.writelines(lines)
+    try:
+        os.chmod(tmp, st.st_mode & 0o7777)
+        os.chown(tmp, st.st_uid, st.st_gid)
+    except OSError:
+        pass
+    os.replace(tmp, EXTENDED_CFG)
 
 
 # ---- validation ---------------------------------------------------------
@@ -367,6 +497,8 @@ def validate(data, current):
         s["enabled"] = bool(data["enabled"])
     if "push_enabled" in data:
         s["push_enabled"] = bool(data["push_enabled"])
+    if "secret" in data and str(data["secret"]):
+        s["secret_for"] = ""     # set below, once the service is known
     if "email_enabled" in data:
         s["email_enabled"] = bool(data["email_enabled"])
     if "webhook_enabled" in data:
@@ -417,6 +549,20 @@ def validate(data, current):
         if RX_CONTROL.search(s[key]):
             raise ConfigError(f"{key}: control characters are not allowed")
     s["server"] = s["server"].rstrip("/")
+    s["email_password"] = s["email_password"].strip()
+    # The push secret is one field for every service (ntfy token or
+    # password, Pushover app token, Telegram bot token, Discord token or
+    # webhook). A stored one is only reused for the service, server and
+    # account it was entered for: switching services means entering the
+    # new one, and a saved token is never sent to another host.
+    scope = secret_scope(s)
+    if s["secret"] and s.get("secret_for", "") not in ("", scope):
+        s["secret"] = ""
+        if s["push_enabled"]:
+            raise ConfigError(
+                "The saved token or password was entered for another "
+                "service or server. Enter the one for this one.")
+    s["secret_for"] = scope if s["secret"] else ""
     if s["provider"] not in PROVIDERS:
         raise ConfigError("Invalid notification service")
     if s["auth"] not in AUTH_MODES:
@@ -438,11 +584,16 @@ def validate(data, current):
         raise ConfigError("Printer URL must look like http://100.64.0.1")
 
     validate_email(s)
-    if s["webhook_enabled"] and (
-            not RX_WEBHOOK.fullmatch(s["webhook_url"])
-            or not urlparse(s["webhook_url"]).hostname):
-        raise ConfigError("Webhook URL must look like "
-                          "https://example.com/hook")
+    if s["webhook_enabled"]:
+        try:
+            u = urlparse(s["webhook_url"])
+            ok = bool(RX_WEBHOOK.fullmatch(s["webhook_url"]) and u.hostname
+                      and (u.port is None or 0 < u.port < 65536))
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ConfigError("Webhook URL must look like "
+                              "https://example.com/hook")
     if s["enabled"] and not s["push_enabled"] and \
             not s["email_enabled"] and not s["webhook_enabled"]:
         raise ConfigError("Enable push notifications, email or a webhook")
@@ -547,6 +698,13 @@ def is_public(server):
     return urlparse(server).hostname in ("ntfy.sh", "www.ntfy.sh")
 
 
+def secret_scope(s):
+    """What a stored push secret is bound to."""
+    if s["provider"] == "ntfy":
+        return f"ntfy|{s['auth']}|{s['server'].lower()}|{s['username']}"
+    return s["provider"]
+
+
 def push_configured(s):
     if not s["enabled"] or not s["push_enabled"]:
         return False
@@ -595,9 +753,12 @@ def query(params):
     return "&".join(f"{k}={quote(str(v), safe='')}" for k, v in params.items())
 
 
-def row_url(s, rid, priority, cam):
-    """Apprise URL for one notification row."""
+def row_url(s, rid, priority, cam, sec=None):
+    """Apprise URL for one notification row. With `sec`, secrets go in as
+    templates (for the generated config); without, as they are (Send
+    Test)."""
     btns = links(s, rid, cam)
+    sec = sec or SecretBag.plain()
     if s["provider"] == "pushover":
         # One link only: the Web UI, or the error index for faults when no
         # printer URL is set
@@ -606,7 +767,8 @@ def row_url(s, rid, priority, cam):
             title, url = btns[0]
             params["url"], params["url_title"] = url, title
         device = f"/{s['pushover_device']}" if s["pushover_device"] else ""
-        return (f"pover://{s['pushover_user']}@{s['secret']}{device}"
+        token = sec.put("push_token", s["secret"])
+        return (f"pover://{s['pushover_user']}@{token}{device}"
                 f"?{query(params)}")
     if s["provider"] == "telegram":
         # Sent as HTML, links in the text (push_notifications adds them);
@@ -614,19 +776,22 @@ def row_url(s, rid, priority, cam):
         params = {"format": "html", "image": "no", "content": "after",
                   "preview": "no", "detect": "no",
                   "silent": "yes" if priority in TELEGRAM_SILENT else "no"}
-        return (f"tgram://{s['secret']}/{quote(s['telegram_chat'], safe='@-')}"
+        token = sec.put("push_token", s["secret"])
+        return (f"tgram://{token}/{quote(s['telegram_chat'], safe='@-')}"
                 f"?{query(params)}")
     if s["provider"] in ("discord", "discord_dm"):
         # discordhook:// and discorddm:// (push_notifications_discord.py)
         params = {"silent": "yes" if priority in TELEGRAM_SILENT else "no"}
         if s["provider"] == "discord_dm":
-            return (f"discorddm://{s['secret']}@{s['discord_user']}"
+            token = sec.put("push_token", s["secret"])
+            return (f"discorddm://{token}@{s['discord_user']}"
                     f"?{query(params)}")
         m = RX_DISCORD_WEBHOOK.fullmatch(s["secret"])
         params["name"] = s["name"]
         if s["discord_mention"] and priority in DISCORD_PING:
             params["ping"] = s["discord_mention"]
-        return f"discordhook://{m.group(1)}/{m.group(2)}?{query(params)}"
+        token = sec.put("push_token", m.group(2))
+        return f"discordhook://{m.group(1)}/{token}?{query(params)}"
     u = urlparse(s["server"])
     scheme = "ntfys" if u.scheme == "https" else "ntfy"
     params = {"image": "no", "priority": priority}
@@ -635,38 +800,43 @@ def row_url(s, rid, priority, cam):
             f"view, {t}, {url}" + (", clear=true" if t == "Web UI" else "")
             for t, url in btns)
     userinfo = ""
+    extra = ""
     if s["auth"] == "basic":
         userinfo = (quote(s["username"], safe="") + ":" +
-                    quote(s["secret"], safe="") + "@")
+                    sec.put("push_password", quote(s["secret"], safe=""))
+                    + "@")
     elif s["auth"] == "token":
-        params["token"] = s["secret"]
-    return f"{scheme}://{userinfo}{u.netloc}/{s['topic']}?{query(params)}"
+        # Not through query(): a template must not be percent-encoded
+        extra = "&token=" + sec.put("push_token", s["secret"])
+    return (f"{scheme}://{userinfo}{u.netloc}/{s['topic']}?{query(params)}"
+            f"{extra}")
 
 
-def webhook_url(s, rid, cam=False):
+def webhook_url(s, rid, cam=False, sec=None):
     """Apprise JSON URL for the webhook: POSTs {"title", "message", "type",
     "attachments": [image as base64], "event": <notification>, "printer":
     <name>}. The webhook's own query parameters are kept (Apprise sends
     "-name" parameters as-is)."""
     u = urlparse(s["webhook_url"])
     scheme = "jsons" if u.scheme == "https" else "json"
-    userinfo = ""
-    if u.username:
-        userinfo = quote(u.username, safe="") + (
-            ":" + quote(u.password or "", safe="")) + "@"
-    host = u.hostname + (f":{u.port}" if u.port else "")
-    params = [f"-{k}={v}" for k, v in
-              (part.split("=", 1) if "=" in part else (part, "")
-               for part in u.query.split("&") if part)]
-    params += [f":event={quote(rid, safe='')}",
-               f":printer={quote(s['name'], safe='')}"]
+    sec = sec or SecretBag.plain()
+    # urlparse leaves userinfo percent-encoded: keep it as given
+    userinfo = u.netloc.rsplit("@", 1)[0] + "@" if "@" in u.netloc else ""
+    host = u.netloc.rsplit("@", 1)[-1]      # keeps IPv6 brackets and port
+    own = [f"-{k}={v}" for k, v in
+           (part.split("=", 1) if "=" in part else (part, "")
+            for part in u.query.split("&") if part)]
+    # The whole address is the secret (a token may be anywhere in it)
+    base = sec.put("webhook", f"{scheme}://{userinfo}{host}{u.path or '/'}"
+                   + ("?" + "&".join(own) if own else ""))
+    params = [f":event={quote(rid, safe='')}",
+              f":printer={quote(s['name'], safe='')}"]
     # The links, as fields (a webhook has no buttons)
     names = {"Web UI": "web_ui", "Live Camera": "live_camera",
              "Error Index": "error_index"}
     params += [f":{names[t]}={quote(url, safe='')}"
                for t, url in links(s, rid, cam)]
-    return (f"{scheme}://{userinfo}{host}{u.path or '/'}?"
-            + "&".join(params))
+    return base + ("&" if own else "?") + "&".join(params)
 
 
 def spoolman_url():
@@ -711,13 +881,15 @@ def enabled_rows(s):
             or rid in hook]
 
 
-def email_url(s):
+def email_url(s, sec=None):
     """Apprise URL for email (SMTP)."""
+    sec = sec or SecretBag.plain()
     scheme = "mailto" if s["email_security"] == "none" else "mailtos"
     userinfo = ""
     if s["email_username"]:
         userinfo = (quote(s["email_username"], safe="") + ":" +
-                    quote(s["email_password"], safe="") + "@")
+                    sec.put("email_password",
+                            quote(s["email_password"], safe="")) + "@")
     # HTML card (push_notifications_email.py) with the image inline;
     # Apprise adds a plain-text version
     params = {"from": s["email_from"], "to": ",".join(recipients(s)),
@@ -737,7 +909,10 @@ def image_kind(s, rid, cam):
     return kind
 
 
-def render_moonraker(s):
+def render_moonraker(s, sec=None):
+    """The generated Moonraker config. Secrets go into `sec` (a SecretBag)
+    and the text refers to them by template; see write_secrets."""
+    sec = sec if sec is not None else SecretBag()
     if not configured(s):
         return None
     rows = enabled_rows(s)
@@ -779,19 +954,19 @@ def render_moonraker(s):
         for name in ([rid, OBJECT_ROW] if rid == "complete"
                      and s["complete_objects"] == "each" else [rid]):
             if rid in push:
-                url = row_url(s, rid, s["rows"][rid]["priority"], cam)
+                url = row_url(s, rid, s["rows"][rid]["priority"], cam, sec)
                 out.append(f"{name}: {kind}, {url}")
             if rid in email:
-                out.append(f"{name}_email: {kind}, {email_url(s)}")
+                out.append(f"{name}_email: {kind}, {email_url(s, sec)}")
             if rid in hook:
                 out.append(f"{name}_webhook: {kind}, "
-                           f"{webhook_url(s, name, cam)}")
+                           f"{webhook_url(s, name, cam, sec)}")
     return "\n".join(out) + "\n"
 
 
 def klipper_lift():
     return f"""[gcode_macro _NTFY_LIFT]
-description: Lift up to {LIFT_MM} mm, then report once the lift is done
+description: Lift up to {LIFT_MM} mm before the print-end snapshot
 gcode:
     {{% set th = printer.toolhead %}}
     {{% set z = printer.gcode_move.gcode_position.z %}}
@@ -799,7 +974,7 @@ gcode:
     {{% if "z" in th.homed_axes and lift > 0 %}}
     SAVE_GCODE_STATE NAME=ntfy_lift
     G91
-    {{% if printer[th.extruder].can_extrude %}}
+    {{% if th.extruder and printer[th.extruder].can_extrude %}}
     G1 E-1 F1800
     {{% endif %}}
     G1 Z{{lift}} F600
@@ -970,8 +1145,37 @@ def tailscale_host():
     return dns.split(".")[0] if dns else (me.get("HostName") or "")
 
 
+def cmd_status():
+    """One line for the settings list: what's on."""
+    s = load()
+    try:
+        validate({}, s)
+    except ConfigError:
+        print("Needs attention")
+        return 0
+    if not s["enabled"]:
+        print("Disabled")
+        return 0
+    on = []
+    if push_configured(s):
+        on.append({"discord_dm": "Discord"}.get(
+            s["provider"], s["provider"].capitalize()
+            if s["provider"] != "ntfy" else "ntfy"))
+    if email_configured(s):
+        on.append("email")
+    if webhook_configured(s):
+        on.append("webhook")
+    print("Enabled: " + ", ".join(on) if on else "Enabled (not set up)")
+    return 0
+
+
 def cmd_get():
     s = load()
+    stored_error = ""
+    try:
+        validate({}, s)
+    except ConfigError as e:
+        stored_error = str(e)
     for key in SECRET_FIELDS:
         s[f"has_{key}"] = bool(s[key])
         s[key] = ""
@@ -986,6 +1190,9 @@ def cmd_get():
         "local_ip": local_ip(),
         "tailscale_host": tailscale_host(),
         "lift_mm": LIFT_MM,
+        # The saved settings no longer pass validation (e.g. after an
+        # update): the generated config is left as it was until fixed
+        "stored_error": stored_error,
     }
     print(json.dumps(s))
 
@@ -1038,46 +1245,135 @@ def discord_find_user(s):
                           f"with): {d.invite_url(app['id'])}")
 
 
+# The settings the Klipper print-end macros depend on: Klipper only reads
+# them at start, so they can't change during a print job
+KLIPPER_ROWS = ("complete", "cancelled", "error")
+KLIPPER_SETTINGS = (("enabled", "Enable notifications"),
+                    ("push_enabled", "Send push notifications"),
+                    ("email_enabled", "Send email notifications"),
+                    ("webhook_enabled", "Send every notification to a webhook"),
+                    ("camera", "Camera for snapshots"))
+
+
+def klipper_settings_changed(old, new):
+    """Which print-end settings differ, as labels for the user."""
+    out = [label for key, label in KLIPPER_SETTINGS if old[key] != new[key]]
+    for rid in KLIPPER_ROWS:
+        for key, what in (("enabled", "push"), ("email", "email"),
+                          ("image", "image")):
+            if old["rows"][rid][key] != new["rows"][rid][key]:
+                out.append(f"{ROW[rid][1]} ({what})")
+    return out
+
+
+def current_text(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def restart_service(name, script):
+    print(f"Restarting {name}...", flush=True)
+    try:
+        rc = subprocess.call([script, "restart"])
+    except OSError as e:
+        rc = 1
+        print(f"ERROR: could not restart {name}: {e}")
+    if rc != 0:
+        print(f"ERROR: {name} restart failed (exit code {rc}); it is "
+              "retried on the next Save & Apply")
+        with open(PENDING_RESTART[name.lower()], "w") as f:
+            f.write("restart owed\n")
+    else:
+        try:
+            os.remove(PENDING_RESTART[name.lower()])
+        except OSError:
+            pass
+    return rc
+
+
+def apprise_check(s):
+    """Every address the generated config will hold must be one Apprise
+    accepts (as the component would otherwise fail to load with all
+    notifications off). Apprise is big: the test cgroup holds it."""
+    if not configured(s):
+        return
+    enter_test_cgroup()
+    import apprise
+    discord_module()        # registers the Discord senders
+    cam = camera_status()[s["camera"]]
+    urls = []
+    if push_configured(s):
+        urls.append(("push service", row_url(s, "complete", "default", cam)))
+    if email_configured(s):
+        urls.append(("email", email_url(s)))
+    if webhook_configured(s):
+        urls.append(("webhook", webhook_url(s, "complete", cam)))
+    for what, url in urls:
+        if not apprise.Apprise().add(url):
+            raise ConfigError(f"The {what} settings don't make a valid "
+                              "address; check them (server, user name, "
+                              "addresses)")
+
+
 def cmd_save():
-    s = validate(read_stdin_json(), load())
+    current = load()
+    s = validate(read_stdin_json(), current)
+    klipper_text = render_klipper(s)
+    busy = printer_busy()
+    if busy and klipper_text != current_text(KLIPPER_CFG):
+        changed = klipper_settings_changed(current, s) or ["the print-end macros"]
+        raise ConfigError(
+            "The printer is printing. These settings change the print-end "
+            "macros, which Klipper only reads at start, so they can't be "
+            "applied now: " + ", ".join(changed) + ". Nothing was saved; "
+            "change them back, or save after the print job.")
     if s["enabled"]:
+        if s["push_enabled"] and s["provider"] == "discord_dm":
+            enter_test_cgroup()     # the Discord lookup imports requests
         telegram_find_chat(s)
         discord_find_user(s)
+    # Render before storing: a value no URL can be built from is an
+    # error now, not a broken config at the next start
+    sec = SecretBag()
+    try:
+        moonraker_text = render_moonraker(s, sec)
+    except ValueError as e:
+        raise ConfigError(f"Invalid settings: {e}")
+    apprise_check(s)
     store(s)
-    print("Settings saved to extended2.cfg [notifications].")
+    write_secrets(dict(sec.values, **{k: s[k] for k in SECRET_FIELDS},
+                       secret_for=s["secret_for"]))
+    print("Settings saved.")
     if configured(s) and not camera_status()[s["camera"]]:
         print(f"NOTE: the {s['camera']} camera has no snapshot service "
               "running; notifications will be sent without camera images.")
     # Services only read their config at start, so writing now is safe
     # even mid-print; the service hooks re-render the same content later.
     restart = []
-    if write_generated(MOONRAKER_CFG, render_moonraker(s)):
+    if write_generated(MOONRAKER_CFG, moonraker_text) or \
+            os.path.exists(PENDING_RESTART["moonraker"]):
         restart.append(("Moonraker", os.path.join(INIT_D, "S61moonraker")))
-    if write_generated(KLIPPER_CFG, render_klipper(s)):
+    if write_generated(KLIPPER_CFG, klipper_text) or \
+            os.path.exists(PENDING_RESTART["klipper"]):
         restart.append(("Klipper", os.path.join(INIT_D, "S60klipper")))
     if not restart:
         print("No configuration change; nothing to restart.")
         return 0
-    names = " and ".join(n for n, _ in restart)
-    if printer_busy():
-        verb = "were" if len(restart) > 1 else "was"
-        print(f"The printer is busy (or its state could not be checked), so "
-              f"{names} {verb} not restarted. The new settings apply after you "
-              f"restart {names} (Actions) or reboot, once the printer is "
-              "idle.")
-        return 0
+    if busy:
+        # Only Moonraker can be here (Klipper changes were refused): the
+        # print job doesn't depend on it, Klipper runs the file itself
+        print("The printer is printing: Moonraker restarts now (the print "
+              "job carries on; Fluidd reconnects in a moment).")
+    # Klipper first: Moonraker reconnects to it
+    rc = 0
     for name, script in reversed(restart):
-        print(f"Restarting {name}...", flush=True)
-        try:
-            rc = subprocess.call([script, "restart"])
-        except OSError as e:
-            print(f"ERROR: could not restart {name}: {e}")
-            return 1
-        if rc != 0:
-            print(f"ERROR: {name} restart failed (exit code {rc})")
-            return rc
-    print("Notifications applied.")
-    return 0
+        rc = restart_service(name, script) or rc
+    if rc == 0:
+        print("Notifications applied.")
+    return rc
 
 
 def fetch_snapshot(s):
@@ -1284,13 +1580,35 @@ def cmd_test():
 
 
 def cmd_render(path, renderer):
+    """Service start: regenerate from the settings. Invalid settings keep
+    the last generated file (Firmware Config shows the error)."""
     try:
         s = validate({}, load())
     except ConfigError as e:
         print(f"notifications: invalid [notifications] settings ({e}); "
-              "notifications disabled", file=sys.stderr)
-        s = defaults()
-    if write_generated(path, renderer(s)):
+              "keeping the last generated config", file=sys.stderr)
+        return 0
+    service = "moonraker" if path == MOONRAKER_CFG else "klipper"
+    try:
+        os.remove(PENDING_RESTART[service])    # this start is it
+    except OSError:
+        pass
+    try:
+        if service == "moonraker":
+            sec = SecretBag()
+            text = renderer(s, sec)
+            write_secrets(dict(sec.values, **{k: s[k] for k in SECRET_FIELDS},
+                               secret_for=s["secret_for"]))
+            if any(read_cfg()[SECTION].get(k) for k in SECRET_FIELDS
+                   if read_cfg().has_section(SECTION)):
+                store(s)    # older settings: move secrets out of the cfg
+        else:
+            text = renderer(s)
+    except (ValueError, OSError) as e:
+        print(f"notifications: could not generate {path} ({e}); keeping "
+              "the last one", file=sys.stderr)
+        return 0
+    if write_generated(path, text):
         print(f"Updated {path}")
     return 0
 
@@ -1298,6 +1616,7 @@ def cmd_render(path, renderer):
 def main(argv):
     cmds = {
         "get": cmd_get,
+        "status": cmd_status,
         "save": cmd_save,
         "test": cmd_test,
         "render-moonraker": lambda: cmd_render(MOONRAKER_CFG,

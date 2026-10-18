@@ -310,18 +310,21 @@ class FirmwareConfigHandler(SimpleHTTPRequestHandler):
                     if if_cmd and not self._check_condition(if_cmd):
                         continue
 
-                    try:
-                        cmd_result = subprocess.run(
-                            config["get_cmd"],
-                            capture_output=True,
-                            text=True,
-                            timeout=5
-                        )
-                        current_value = cmd_result.stdout.strip() if cmd_result.returncode == 0 else config.get("default", "")
-                    except Exception:
-                        current_value = config.get("default", "")
-
                     form = config.get("form")
+                    current_value = config.get("default", "")
+                    if "get_cmd" in config:
+                        try:
+                            cmd_result = subprocess.run(
+                                config["get_cmd"],
+                                capture_output=True,
+                                text=True,
+                                timeout=5
+                            )
+                            if cmd_result.returncode == 0:
+                                current_value = cmd_result.stdout.strip()
+                        except Exception:
+                            pass
+
                     if form:
                         settings_list.append({
                             "id": setting_id,
@@ -405,6 +408,15 @@ class FirmwareConfigHandler(SimpleHTTPRequestHandler):
             cmd_cfg = (form or {}).get("commands", {}).get(command)
             if not cmd_cfg:
                 self.send_error(404, "Unknown form command")
+                return
+            # A form carries settings and credentials: only accept it from
+            # this page. A JSON content type makes a cross-site browser
+            # request need a preflight, which this server never grants.
+            ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+            origin = self.headers.get('Origin') or ''
+            host = self.headers.get('Host') or ''
+            if ctype != 'application/json' or (origin and origin.split('//', 1)[-1] != host):
+                self.send_error(403, "Form requests must come from this page")
                 return
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 64 * 1024:

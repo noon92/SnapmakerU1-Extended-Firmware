@@ -32,6 +32,7 @@
     .nt-table select.nt-input.nt-layer { width: auto; padding: 4px 6px; display: inline-block; font-family: inherit; }
     .nt-sub { display: block; margin-top: 4px; font-size: 12px; color: #8a8f98; white-space: nowrap; }
     .nt-sub select.nt-input.nt-layer { font-size: 12px; padding: 2px 4px; max-width: 140px; }
+    .nt-sub input.nt-input.nt-deg { width: 56px; font-size: 12px; padding: 2px 4px; display: inline-block; }
     .nt-foot { font-size: 12px; color: #8a8f98; margin: 0 0 16px; }
     .nt-table select.nt-input { padding: 5px 8px; width: 120px; }
     .nt-table td input[type=checkbox] { vertical-align: middle; }
@@ -357,12 +358,17 @@
                 ? `<span class="nt-sub">Print-by-object mode: <select class="nt-input nt-layer" id="${byObject[0]}">${[['each', 'once per object *'], ['once', 'once per print job']].map(([v, t]) =>
                     `<option value="${v}"${v === byObject[1] ? ' selected' : ''}>${t}</option>`).join('')}</select></span>`
                 : '';
+            // X or Y stepper driver at or over this temperature: once per
+            // print job, and again after a pause
+            const driver = meta.id === 'driver_hot'
+                ? `<span class="nt-sub">X or Y driver over <input class="nt-input nt-layer nt-deg" id="nt-driver-hot" type="number" min="40" max="150" inputmode="numeric" value="${state.driver_temp}"> °C</span>`
+                : '';
             const image = meta.image
                 ? `<input type="checkbox" data-image="${meta.id}"${row.image ? ' checked' : ''}>`
                 : '<span class="nt-na">—</span>';
             if (meta.group === 'spoolman' && !state.meta.spoolman) return html;
             return html + `<tr data-row="${meta.id}">
-                <td><span class="nt-icon">${meta.icon}</span>${layer ? `${layer} <span class="nt-name">layer complete</span>` : `<span class="nt-name">${esc(meta.label)}</span>`}${objects}</td>
+                <td><span class="nt-icon">${meta.icon}</span>${layer ? `${layer} <span class="nt-name">layer complete</span>` : `<span class="nt-name">${esc(meta.label)}</span>`}${objects}${driver}</td>
                 <td class="nt-c nt-col-push"><input type="checkbox" data-enabled="${meta.id}"${row.enabled ? ' checked' : ''}></td>
                 <td class="nt-col-push"><select class="nt-input nt-dim-push" data-priority="${meta.id}">${prio}</select></td>
                 <td class="nt-c nt-col-email"><input type="checkbox" data-email="${meta.id}"${row.email ? ' checked' : ''}></td>
@@ -738,6 +744,7 @@
                 printer_url: el('nt-printer-url').value.trim(),
                 layers_complete: parseInt(el('nt-layers').value, 10) || 2,
                 first_layer_objects: el('nt-layer-objects').value,
+                driver_temp: parseInt(el('nt-driver-hot').value, 10) || 105,
                 complete_objects: el('nt-complete-objects').value,
                 filament_low_percent: parseInt(el('nt-fl-percent').value, 10) || 0,
                 filament_low_grams: parseInt(el('nt-fl-grams').value, 10) || 0,

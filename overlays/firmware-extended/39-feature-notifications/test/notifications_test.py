@@ -592,6 +592,43 @@ async def test_spool_switch():
           not log, [e["title"] for e in log])
 
 
+async def test_driver_hot():
+    print("Driver temperature: once per print job, again after a pause")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({"driver_temp": "105"},
+                     {"driver_hot": [("ntfy", ntfy, False)],
+                      "paused": [("ntfy", ntfy, False)],
+                      "resumed": [("ntfy", ntfy, False)]})
+    await start_job(server)
+    events = server.handlers["job_state:state_changed"]
+
+    async def temps(x, y):
+        await c._on_status_update(
+            {"tmc2240 stepper_x": {"temperature": x},
+             "tmc2240 stepper_y": {"temperature": y}}, 0)
+    await temps(98, 101)
+    await temps(104, 106)
+    await temps(107, 108)
+    await temps(104, 104)
+    await temps(106, 103)
+    await asyncio.sleep(0.4)
+    hot = [e for e in log if "driver" in e["title"]]
+    check("one alert per print job, when either driver reaches the limit",
+          len(hot) == 1 and "Y driver: 106 °C (alert at 105 °C)" in hot[0]["body"]
+          and "X driver: 104 °C\n" in hot[0]["body"], [e["body"] for e in hot])
+    STATE["print_stats"] = ps("paused")
+    await events(JobEvent.PAUSED, {}, STATE["print_stats"])
+    STATE["print_stats"] = ps("printing")
+    await events(JobEvent.RESUMED, {}, STATE["print_stats"])
+    await temps(109, 100)
+    await asyncio.sleep(0.4)
+    hot = [e for e in log if "driver" in e["title"]]
+    check("after a pause it can warn again", len(hot) == 2
+          and "X driver: 109 °C (alert" in hot[1]["body"], len(hot))
+
+
 async def test_print_by_object():
     print("Print by object: layer and object notifications")
     reset_world()
@@ -726,7 +763,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch,
+              test_faults_over_a_job, test_spool_switch, test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

@@ -107,6 +107,10 @@ ROWS = [
      True),
     ("power_loss", "Power loss recovery", "🔌", True, "max", "snapshot", "fault",
      True),
+    # X or Y stepper driver at or over the set temperature; once per print
+    # job, again after a pause
+    ("driver_hot", "Driver running hot", "🌡️", True, "high", None, "fault",
+     True),
     # Need the Spoolman integration
     ("filament_short", "Not enough filament", "🧵", True, "high", "spool",
      "spoolman", True),
@@ -203,6 +207,7 @@ def defaults():
         "complete_objects": "each",
         "filament_low_percent": 10,
         "filament_low_grams": 50,
+        "driver_temp": 105,     # °C, X or Y stepper driver (row: driver_hot)
         "email_enabled": False,
         "webhook_enabled": False,
         "webhook_url": "",
@@ -365,7 +370,7 @@ def load_from(cfg):
         if key in sec:
             s[key] = sec.get(key).strip()
     for key in ("layers_complete", "email_port", "filament_low_percent",
-                "filament_low_grams"):
+                "filament_low_grams", "driver_temp"):
         try:
             s[key] = int(sec.get(key, str(s[key])))
         except ValueError:
@@ -427,6 +432,7 @@ def section_lines(s):
         f"complete_objects: {s['complete_objects']}",
         f"filament_low_percent: {s['filament_low_percent']}",
         f"filament_low_grams: {s['filament_low_grams']}",
+        f"driver_temp: {s['driver_temp']}",
         f"spoolman_rev: {SPOOLMAN_REV}",
         f"email_enabled: {'true' if s['email_enabled'] else 'false'}",
         f"email_host: {s['email_host']}",
@@ -528,6 +534,13 @@ def validate(data, current):
             s["layers_complete"] = int(data["layers_complete"])
         except (TypeError, ValueError):
             raise ConfigError("Layer must be 1, 2 or 3")
+    if "driver_temp" in data:
+        try:
+            s["driver_temp"] = int(data["driver_temp"])
+        except (TypeError, ValueError):
+            raise ConfigError("Driver temperature must be a number")
+    if not 40 <= s["driver_temp"] <= 150:
+        raise ConfigError("Driver temperature alert: 40 to 150 °C")
     rows = data.get("rows") or {}
     if not isinstance(rows, dict):
         raise ConfigError("Invalid request")
@@ -932,6 +945,8 @@ def render_moonraker(s, sec=None):
         out.append(f"snapshot_url: {SNAPSHOT_HOST}{SNAPSHOT_PATH[s['camera']]}")
     out.append(f"layers_complete: {s['layers_complete']}")
     out.append(f"first_layer_objects: {s['first_layer_objects']}")
+    if "driver_hot" in rows:
+        out.append(f"driver_temp: {s['driver_temp']}")
     # complete_objects isn't a component option: it decides whether the
     # object_complete rows below exist
     if s["timezone"]:

@@ -93,7 +93,7 @@ MILESTONES = (25, 50, 75)
 ROW_IDS = (
     "started", "layer_started", "first_layer", "progress_25", "progress_50", "progress_75",
     "paused", "resumed", "object_complete", "complete", "cancelled",
-    "error", "warning", "shutdown", "power_loss",
+    "error", "warning", "shutdown", "power_loss", "driver_hot",
     "filament_short", "filament_low", "spool_switch",
 )
 SPOOLMAN_ROWS = ("filament_short", "filament_low", "spool_switch")
@@ -112,6 +112,7 @@ TITLES = {
     "warning": "⚠️ {name} Warning",
     "shutdown": "🛑 {name} Error: shutdown",
     "power_loss": "🔌 {name} power loss",
+    "driver_hot": "🌡️ {name} driver running hot",
     "filament_short": "🧵 {name} not enough filament",
     "filament_close": "🧵 {name} filament may be insufficient",
     "filament_unknown": "🧵 {name} filament amount unknown",
@@ -151,7 +152,7 @@ BODY_LIMITS = {"pushover": (True, 1024), "ntfy": (False, 4000),
                "telegram": (True, 3500), "discord": (True, 3500)}
 # Discord's embed colour (Apprise notification type) for each notification
 NOTIFY_TYPES = {"complete": "success", "object_complete": "success",
-                "error": "failure",
+                "driver_hot": "warning", "error": "failure",
                 "warning": "failure", "shutdown": "failure",
                 "power_loss": "failure", "filament_short": "failure",
                 "cancelled": "warning", "paused": "warning",
@@ -208,6 +209,11 @@ PL_CAMERA_POLL = 5.
 
 FaultKey = Tuple[Any, Any, Any]
 GCODE_EXTS = (".gcode", ".gco", ".g")
+# The X and Y stepper drivers report their own temperature (TMC2240 ADC);
+# the alert goes once per print job, and again after a pause (so a print
+# job paused for the heat and resumed can warn a second time)
+DRIVERS = {"tmc2240 stepper_x": "X", "tmc2240 stepper_y": "Y"}
+DRIVER_HOT_DEFAULT = 105
 # Print-by-object (Orca "print_sequence = by object"): the slicer's config
 # block at the end of the file says so, and its EXCLUDE_OBJECT markers tell
 # Klipper which object is being printed. Layer numbers run on across the
@@ -409,6 +415,10 @@ class PushNotifications:
             "filament_low_percent", 10., minval=0., maxval=100.)
         self.filament_low_grams: float = config.getfloat(
             "filament_low_grams", 50., minval=0.)
+        # The option is driver_temp: driver_hot is the row
+        self.driver_hot: float = config.getfloat(
+            "driver_temp", DRIVER_HOT_DEFAULT, minval=40., maxval=150.)
+        self._driver_hot_sent = False
         self._filament_job = 0      # bumped per job; stops an old watcher
         self._job_map: List[Any] = []       # extruder_map_table at start
         self._job_tools: Set[int] = set()   # slicer filaments the job uses
@@ -503,7 +513,7 @@ class PushNotifications:
         self._obj_first_sent: Set[str] = set()
         self._status: Dict[str, Dict[str, Any]] = {
             "print_stats": {}, "virtual_sdcard": {}, "print_task_config": {},
-            "exclude_object": {}}
+            "exclude_object": {}, **{d: {} for d in DRIVERS}}
 
         self.server.register_event_handler(
             "job_state:state_changed", self._on_job_event)
@@ -1004,6 +1014,7 @@ class PushNotifications:
                     "paused", self._title("paused"), shown(filename),
                     delay=PAUSE_SNAPSHOT_DELAY))
         elif job_event == JobEvent.RESUMED:
+            self._driver_hot_sent = False   # a hot driver may warn again
             if ex is not None:
                 self._stale_fault = fault_key(ex)
             self._status["print_stats"].update(
@@ -1066,6 +1077,7 @@ class PushNotifications:
                  .get("current_layer") or 0)
         self._first_layer_sent = int(layer) > self.layers_complete
         self._layer_started_sent = int(layer) >= 1
+        self._driver_hot_sent = False
         self._by_object = await self.eventloop.run_in_thread(
             self._is_by_object, filename)
         self._obj_start = {}
@@ -1226,7 +1238,8 @@ class PushNotifications:
                                       "print_duration"],
                       "virtual_sdcard": ["progress", "file_position"],
                       "exclude_object": ["objects", "current_object",
-                                         "excluded_objects"]},
+                                         "excluded_objects"],
+                      **{d: ["temperature"] for d in DRIVERS}},
                      **({"print_task_config": PTC_FIELDS}
                         if self._spoolman_active() else {})),
                 self._on_status_update, default={})
@@ -1258,6 +1271,22 @@ class PushNotifications:
         if not self._job_active or ps.get("state") != "printing":
             return
         filename = ps.get("filename") or ""
+        if "driver_hot" in self.rows and not self._driver_hot_sent and \
+                any(d in data for d in DRIVERS):
+            temps = {axis: self._status[d].get("temperature")
+                     for d, axis in DRIVERS.items()}
+            hot = [a for a, t in temps.items()
+                   if t is not None and float(t) >= self.driver_hot]
+            if hot:
+                self._driver_hot_sent = True
+                self._spawn(self._send(
+                    "driver_hot", self._title("driver_hot"),
+                    self._lines(shown(filename), *(
+                        f"{a} driver: {temps[a]:.0f} °C"
+                        + (f" (alert at {self.driver_hot:.0f} °C)"
+                           if a in hot else "")
+                        for a in DRIVERS.values()
+                        if temps[a] is not None))))
         if self._by_object and not self._objects():
             # No EXCLUDE_OBJECT markers (label objects off): nothing to
             # track per object, so it's reported like a by-layer job

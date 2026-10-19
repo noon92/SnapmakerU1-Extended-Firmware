@@ -1378,13 +1378,20 @@ def cmd_save():
     s = validate(read_stdin_json(), current)
     klipper_text = render_klipper(s)
     busy = printer_busy()
+    macros_stale = False
     if busy and klipper_text != current_text(KLIPPER_CFG):
-        changed = klipper_settings_changed(current, s) or ["the print-end macros"]
-        raise ConfigError(
-            "The printer is printing. These settings change the print-end "
-            "macros, which Klipper only reads at start, so they can't be "
-            "applied now: " + ", ".join(changed) + ". Nothing was saved; "
-            "change them back, or save after the print job.")
+        changed = klipper_settings_changed(current, s)
+        if changed:
+            raise ConfigError(
+                "The printer is printing. These settings change the "
+                "print-end macros, which Klipper only reads at start, so "
+                "they can't be applied now: " + ", ".join(changed) +
+                ". Nothing was saved; change them back, or save after the "
+                "print job.")
+        # Same settings, different text: the macro template changed with a
+        # firmware update (the start hook kept the old file). Klipper is
+        # running the old macros; it picks these up at its next start.
+        macros_stale = True
     if s["enabled"]:
         if s["push_enabled"] and s["provider"] == "discord_dm":
             enter_test_cgroup()     # the Discord lookup imports requests
@@ -1418,8 +1425,23 @@ def cmd_save():
         print("No configuration change; nothing to restart.")
         return 0
     if busy:
-        # Only Moonraker can be here (Klipper changes were refused): the
-        # print job doesn't depend on it, Klipper runs the file itself
+        if any(n == "Klipper" for n, _ in restart):
+            # Settings changes to the macros were refused above; this is a
+            # template change from a firmware update (or an owed restart).
+            # Klipper stays as it is until the print job is done.
+            restart = [r for r in restart if r[0] != "Klipper"]
+            with open(PENDING_RESTART["klipper"], "w") as f:
+                f.write("restart owed\n")
+            print("The print-end macros changed with this firmware update. "
+                  "Klipper keeps the old ones for the current print job and "
+                  "loads the new ones at its next start (a reboot, or Save & "
+                  "Apply once the print job is done)."
+                  if macros_stale else
+                  "Klipper restart still owed; it's done on the next Save & "
+                  "Apply once the print job is done.")
+            if not restart:
+                return 0
+        # The print job doesn't depend on Moonraker: Klipper runs the file
         print("The printer is printing: Moonraker restarts now (the print "
               "job carries on; Fluidd reconnects in a moment).")
     # Klipper first: Moonraker reconnects to it

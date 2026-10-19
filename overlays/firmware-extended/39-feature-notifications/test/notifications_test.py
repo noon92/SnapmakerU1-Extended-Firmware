@@ -1052,6 +1052,21 @@ def run_config_tests():
     rc, out = save(dict(base, name="U1b"))
     check("nothing owed, nothing changed: no restart",
           rc == 0 and calls == [], (rc, calls, out))
+    # A firmware update changed the macro template while the stored
+    # settings stayed the same: mid-print, save and owe the Klipper restart
+    with open(nc.KLIPPER_CFG, "a") as f:
+        f.write("# old template\n")
+    rc, out = save(dict(base, name="U1b"), busy=True)
+    check("mid-print: a template-only macro change is written and owed",
+          rc == 0 and calls == [] and "firmware update" in out
+          and os.path.exists(nc.PENDING_RESTART["klipper"])
+          and "# old template" not in open(nc.KLIPPER_CFG).read(),
+          (rc, calls, out))
+    rc, out = save(dict(base, name="U1b"))
+    check("...and Klipper restarts on the next idle save",
+          rc == 0 and calls == ["S60klipper"]
+          and not os.path.exists(nc.PENDING_RESTART["klipper"]),
+          (rc, calls, out))
 
     check("Discord: mention only on high/max",
           "ping=everyone" in nc.row_url(d, "error", "max", True)

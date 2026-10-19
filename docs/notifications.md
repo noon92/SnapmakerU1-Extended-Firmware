@@ -387,8 +387,11 @@ time. Klipper only reads its config at start, so a change to what the
 print-end macros do (*Print complete*, *Print cancelled* and *Error*: on
 or off, email, camera image; the camera, or enabling notifications, push,
 email or the webhook) is refused while printing, naming the settings, and
-nothing is saved until the print job ends. A restart that fails is done on
-the next Save & Apply.
+nothing is saved until the print job ends. If the macros changed only
+because a firmware update changed their template, the settings are saved
+and Klipper keeps the old macros for the current print job; it loads the
+new ones at its next start. A restart that fails is done on the next
+Save & Apply.
 
 For other services
 (Slack, Matrix, etc.), add your own Moonraker

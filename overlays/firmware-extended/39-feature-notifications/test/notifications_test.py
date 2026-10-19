@@ -812,6 +812,28 @@ def run_config_tests():
     nc.validate(dict(provider="ntfy", server="https://ntfy.example.com",
                      topic="u1", printer_url="http://u1"), nc.load())
     check("a dot-less printer host is fine for the other services", True)
+    nc._TAILSCALE = ("u1", "100.64.0.10")
+    try:
+        tg = dict(enabled=True, provider="telegram", secret="12345:" + "A" * 35,
+                  telegram_chat="123", printer_url="http://U1/")
+        s = nc.validate(tg, nc.load())
+        check("Telegram: the Tailscale name is accepted and sent as the IP",
+              nc.links(s, "test", True)[:2] == [
+                  ("Web UI", "http://100.64.0.10/"),
+                  ("Live Camera", "http://100.64.0.10/webcam/webrtc")]
+              and "web_ui_url: http://100.64.0.10/" in nc.render_moonraker(s)
+              and s["printer_url"] == "http://U1/",
+              nc.links(s, "test", True))
+        bad(dict(provider="telegram", secret="12345:" + "A" * 35,
+                 telegram_chat="123", printer_url="http://other"),
+            "Telegram: another dot-less name is still refused")
+        s = nc.validate(dict(enabled=True, provider="ntfy",
+                             server="https://ntfy.example.com", topic="u1",
+                             printer_url="http://u1"), nc.load())
+        check("other services keep the Tailscale name",
+              nc.links(s, "test", True)[0] == ("Web UI", "http://u1/"))
+    finally:
+        nc._TAILSCALE = None
     bad(dict(provider="discord", secret="https://example.com/x"),
         "rejects a URL that isn't a Discord webhook")
 

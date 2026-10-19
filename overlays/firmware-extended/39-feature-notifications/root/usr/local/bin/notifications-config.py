@@ -595,14 +595,14 @@ def validate(data, current):
         raise ConfigError("Invalid time zone")
     if s["printer_url"] and not RX_PRINTER_URL.fullmatch(s["printer_url"]):
         raise ConfigError("Printer URL must look like http://100.64.0.1")
-    if s["printer_url"] and s["provider"] == "telegram" and s["push_enabled"] \
-            and "." not in urlparse(s["printer_url"]).hostname.strip("[]") \
-            and ":" not in urlparse(s["printer_url"]).hostname:
-        # Telegram drops text links whose host has no dot (a bare MagicDNS
-        # name): the text stays, the link is gone
-        raise ConfigError("Telegram doesn't link to a name without a dot, "
-                          "such as http://u1. Use the Tailscale IP (Use "
-                          "Tailscale) or the local IP.")
+    if s["printer_url"] and s["provider"] == "telegram" and s["push_enabled"]:
+        host = urlparse(printer_root(s)).hostname or ""
+        if "." not in host and ":" not in host:
+            # Telegram drops text links whose host has no dot; the Tailscale
+            # name was already replaced by the IP in printer_root
+            raise ConfigError("Telegram doesn't link to a name without a "
+                              "dot, such as http://u1. Use the Tailscale "
+                              "name (Use Tailscale) or an IP address.")
 
     validate_email(s)
     if s["webhook_enabled"]:
@@ -761,7 +761,7 @@ def links(s, rid, cam):
     """(title, url) buttons for a notification."""
     out = []
     if s["printer_url"]:
-        root = s["printer_url"].rstrip("/")
+        root = printer_root(s)
         out.append(("Web UI", root + "/"))
         if cam:
             out.append(("Live Camera", root + LIVE_PATH[s["camera"]]))
@@ -967,7 +967,7 @@ def render_moonraker(s, sec=None):
     text_links = email or (push and s["provider"] in (
         "telegram", "discord", "discord_dm"))
     if text_links and s["printer_url"]:
-        root = s["printer_url"].rstrip("/")
+        root = printer_root(s)
         out.append(f"web_ui_url: {root}/")
         if cam:
             out.append(f"camera_url: {root}{LIVE_PATH[s['camera']]}")
@@ -1151,9 +1151,33 @@ def local_ip():
         return ""
 
 
+_TAILSCALE = None
+
+
 def tailscale_info():
     """(MagicDNS name, IPv4) of this printer, if Tailscale is enabled and
-    running; ("", "") otherwise."""
+    running; ("", "") otherwise. Looked up once per run."""
+    global _TAILSCALE
+    if _TAILSCALE is None:
+        _TAILSCALE = _tailscale_info()
+    return _TAILSCALE
+
+
+def printer_root(s):
+    """The Printer URL without a trailing slash, as sent: for Telegram the
+    Tailscale name becomes the Tailscale IP, because Telegram drops text
+    links whose host has no dot (the text stays, the link is gone)."""
+    root = s["printer_url"].rstrip("/")
+    if s["provider"] == "telegram" and s["push_enabled"]:
+        host, ip = tailscale_info()
+        u = urlparse(root)
+        if host and ip and (u.hostname or "").lower() == host.lower():
+            port = f":{u.port}" if u.port else ""
+            root = u._replace(netloc=f"{ip}{port}").geturl()
+    return root
+
+
+def _tailscale_info():
     if read_cfg().get("remote_access", "vpn", fallback="none").strip() \
             != "tailscale":
         return "", ""

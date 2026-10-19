@@ -27,8 +27,12 @@ INK: RGB = (32, 34, 38)
 GREY: RGB = (95, 98, 105)
 STATUS_COLOURS = {"red": RED, "orange": ORANGE, "green": GREEN, "ink": INK}
 
-WIDTH = 960
-ROW = 286
+WIDTH = 760
+ROW = 330
+COLUMN = 300       # width of each spool's column
+LEFT = 190         # centre of the toolhead's column
+RIGHT = 570        # centre of the refill's column (or the note)
+ARROW = 380        # centre of the arrow between them
 SPOOL = 170        # spool height in px
 SQUASH = 0.5       # side view at ~60 degrees
 DEPTH = 0.32       # spool width between flanges, fraction of its height
@@ -211,56 +215,57 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
       toolhead, word, status, needs (str or ""), remaining, full, colour,
       name, and optionally refill = {toolhead, remaining, full, colour,
       name, status} or note = [lines].
+    Both spools are drawn as the same stack: toolhead above, amount left,
+    what it needs (left spool only) and the filament's name below. `word`
+    is not drawn: the colour and the amounts say it.
     """
     height = ROW * len(rows) + 12
     bg = _background(height)
+
+    def stack(d: ImageDraw.ImageDraw, cx: float, y0: int, sp: Dict[str, Any],
+              col: RGB, needs: str = "") -> None:
+        _text(d, (cx, y0 + 2), sp["toolhead"], True, 24, col, center=True)
+        y = y0 + SPOOL + 66
+        _text(d, (cx, y), "Amount left unknown" if sp.get("unknown")
+              else grams_text(sp["remaining"], sp.get("full")),
+              True, 20, col, center=True)
+        y += 27
+        if needs:
+            _text(d, (cx, y), needs.rstrip("."), False, 20, INK, center=True)
+            y += 27
+        _text(d, (cx, y), _fit(d, sp.get("name") or "", font(False, 16),
+                               COLUMN - 20), False, 16, GREY, center=True)
+
     for i, row in enumerate(rows):
         y0 = 6 + i * ROW
         col = STATUS_COLOURS.get(row["status"], INK)
-        bg = _put(bg, 370, y0 + 22, spool(
-            UNKNOWN_FILL if row.get("unknown")
-            else level(row["remaining"], row.get("full")),
-            row.get("colour") or (200, 200, 200)))
         refill = row.get("refill")
-        if refill:
-            bg = _put(bg, 740, y0 + 27, spool(
-                UNKNOWN_FILL if refill.get("unknown")
-                else level(refill["remaining"], refill.get("full")),
-                refill.get("colour") or (200, 200, 200)))
+        for cx, sp in ((LEFT, row), (RIGHT, refill)):
+            if sp:
+                bg = _put(bg, cx, y0 + 40, spool(
+                    UNKNOWN_FILL if sp.get("unknown")
+                    else level(sp["remaining"], sp.get("full")),
+                    sp.get("colour") or (200, 200, 200)))
         d = ImageDraw.Draw(bg)
         if i:
             d.line([40, y0 - 4, WIDTH - 40, y0 - 4], fill=(190, 193, 200),
                    width=2)
-        _text(d, (36, y0 + 52), row["toolhead"], True, 32, col)
-        _text(d, (36, y0 + 98), _fit(d, row["word"], font(True, 22), 250),
-              True, 22, col)
-        if row.get("needs"):
-            _text(d, (36, y0 + 132), row["needs"], False, 21, INK)
-        _text(d, (370, y0 + 222), "Amount left unknown" if row.get("unknown")
-              else grams_text(row["remaining"], row.get("full")),
-              True, 20, col, center=True)
-        _text(d, (370, y0 + 248), _fit(d, row.get("name") or "",
-                                       font(False, 16), 250),
-              False, 16, GREY, center=True)
+        stack(d, LEFT, y0, row, col, row.get("needs") or "")
         if refill:
-            ay = y0 + 107
-            d.line([505, ay, 585, ay], fill=(45, 48, 54), width=8)
-            d.polygon([(607, ay), (579, ay - 21), (579, ay + 21)],
+            ay = y0 + 40 + SPOOL // 2
+            x0, x1 = ARROW - 50, ARROW + 50
+            d.line([x0, ay, x1 - 22, ay], fill=(45, 48, 54), width=8)
+            d.polygon([(x1, ay), (x1 - 28, ay - 21), (x1 - 28, ay + 21)],
                       fill=(45, 48, 54))
-            _text(d, (556, ay - 52), "refill", False, 18, GREY, center=True)
-            _text(d, (740, y0 - 5), refill["toolhead"], True, 20, INK,
+            _text(d, (ARROW, ay - 52), "refill", False, 18, GREY,
                   center=True)
-            _text(d, (740, y0 + 222), "Amount left unknown"
-                  if refill.get("unknown")
-                  else grams_text(refill["remaining"], refill.get("full")),
-                  True, 20, STATUS_COLOURS.get(refill.get("status"), INK),
-                  center=True)
-            _text(d, (740, y0 + 248), _fit(d, refill.get("name") or "",
-                                           font(False, 16), 300),
-                  False, 16, GREY, center=True)
+            stack(d, RIGHT, y0, refill,
+                  STATUS_COLOURS.get(refill.get("status"), INK))
         else:
-            for k, line in enumerate(row.get("note") or []):
-                _text(d, (735, y0 + 84 + k * 30), line, False, 20, GREY,
+            lines = row.get("note") or []
+            y = y0 + 40 + SPOOL // 2 - 15 * len(lines)
+            for k, line in enumerate(lines):
+                _text(d, (RIGHT, y + k * 30), line, False, 20, GREY,
                       center=True)
     bg.convert("RGB").save(path, quality=88)
     return path

@@ -679,6 +679,21 @@
             });
         },
 
+        // Saving while a print job runs restarts Moonraker (the UI): ask
+        // first. The printer's state is read at that moment, not at open.
+        async confirm(command, payload, changed) {
+            if (command !== 'save' || !changed) return true;
+            let busy = false;
+            try {
+                const data = await apiFetch('api/form/notifications').then(r => r.json());
+                busy = !!data.meta.busy;
+            } catch (e) { busy = true; }
+            if (!busy) return true;
+            return new Promise(resolve => showConfirmModal('Save during a print job?',
+                'Saving restarts the printer UI. This should not impact the print job.\n\nContinue?',
+                () => resolve(true), () => resolve(false)));
+        },
+
         collect() {
             const enabled = el('nt-enabled').checked;
             const pushEnabled = el('nt-push-enabled').checked;

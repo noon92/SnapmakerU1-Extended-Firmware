@@ -933,6 +933,10 @@
                 showFormError(e.message);
                 return;
             }
+            // A form may ask the user first (e.g. a save that restarts a
+            // service during a print job)
+            const confirm = window.firmwareConfigForms[id].confirm;
+            if (confirm && !(await confirm(command, payload, formSnapshot() !== formSaved))) return;
             showActionModal(`${setting.label}: ${cmd.label}`, 'Running...');
             $('action-log').classList.add('visible');
             try {

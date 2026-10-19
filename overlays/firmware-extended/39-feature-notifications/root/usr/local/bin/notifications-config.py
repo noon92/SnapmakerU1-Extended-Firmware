@@ -1243,6 +1243,9 @@ def cmd_get():
         "local_ip": local_ip(),
         "tailscale_host": ts_host,
         "tailscale_ip": ts_ip,
+        # Printing or paused: the form asks before a save that restarts
+        # Moonraker (read again right before saving)
+        "busy": printer_busy(),
         "lift_mm": LIFT_MM,
         # The saved settings no longer pass validation (e.g. after an
         # update): the generated config is left as it was until fixed

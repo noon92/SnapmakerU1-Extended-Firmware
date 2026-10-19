@@ -592,6 +592,27 @@ async def test_spool_switch():
           not log, [e["title"] for e in log])
 
 
+async def test_time_left():
+    print("Time left: slicer estimate early, measured later")
+    reset_world()
+    server, c = make({}, {"first_layer": [("ntfy", FakeService([], "ntfy"),
+                                           False)]})
+    await start_job(server)          # estimated_time 3600, print_duration 600
+
+    async def at(pos, pd=600):
+        await c._on_status_update({"virtual_sdcard": {"file_position": pos},
+                                   "print_stats": {"print_duration": pd}}, 0)
+        return c._time_left()
+    left = await at(1000 + 200)                               # 2 % of the file
+    check("early in the job: slicer estimate minus time printed",
+          left.startswith("~50m left"), left)
+    left = await at(1000 + 5000)                              # 50 %
+    check("later: print time / progress", left.startswith("~10m left"), left)
+    left = await at(1000 + 200, pd=4000)   # early, but slower than the slicer said
+    check("early but already past the estimate: never 0 left",
+          left.startswith("~29m left"), left)
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -763,7 +784,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_driver_hot,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

@@ -177,6 +177,9 @@ RECOVERY_MIN_PROGRESS = 0.01
 # start G-code alone is past 1 %)
 RECOVERY_MIN_TIME = 30.
 RECOVERY_SURE_PROGRESS = 0.10
+# Below this file progress, time left comes from the slicer estimate rather
+# than print time / progress (the first layer alone makes that ratio useless)
+EARLY_PROGRESS = 0.10
 SEND_RETRY_DELAYS = (6, 10, 30)   # seconds before each retry of a failed send
 # Within one service (services never wait on each other), faults go ahead of
 # everything else, and these status notifications are dropped if they could
@@ -924,19 +927,21 @@ class PushNotifications:
         """Time left like Fluidd's default ("file") estimate:
         print time / file progress - print time. Snapmaker's power-loss
         recovery keeps the print time, so this holds for recovered jobs
-        too; if the print time isn't known yet, the slicer estimate for the
-        rest of the file is used."""
+        too. Early in the job that ratio is far off (heating, purge and the
+        slow first layer are most of the time so far), so until
+        EARLY_PROGRESS the slicer's estimate minus the time printed is used
+        when there is one."""
         pd = float(self._status["print_stats"].get("print_duration") or 0.)
         progress = self._progress()
         if progress <= 0. or progress >= 1.:
             return ""
-        if pd > 0.:
+        est = self._estimated_time(self._job_filename)
+        if est > 0. and (pd <= 0. or progress < EARLY_PROGRESS):
+            left = max(est - pd, est * (1. - progress) * 0.5)
+        elif pd > 0.:
             left = pd / progress - pd
         else:
-            est = self._estimated_time(self._job_filename)
-            if est <= 0.:
-                return ""
-            left = est * (1. - progress)
+            return ""
         clock = self._clock(left)
         # "~": time left is an estimate (the slicer estimate is labelled)
         return f"~{format_duration(left)} left" + (f", ETA {clock}" if clock

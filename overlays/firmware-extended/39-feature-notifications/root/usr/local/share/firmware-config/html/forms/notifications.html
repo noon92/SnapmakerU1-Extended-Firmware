@@ -475,13 +475,23 @@
         // Highlight the button whose address is in the field
         const same = (host) => !!host && url.replace(/\/+$/, '').toLowerCase() === ('http://' + host).toLowerCase();
         el('nt-use-local').classList.toggle('nt-active', same(state.meta.local_ip));
-        el('nt-use-tailscale').classList.toggle('nt-active', same(state.meta.tailscale_host));
+        el('nt-use-tailscale').classList.toggle('nt-active', same(tailscaleAddress()));
         const prov = el('nt-provider').value;
         el('nt-printer-url-hint').innerHTML = prov === 'pushover'
             ? 'Adds a <b>Web UI</b> link. Without it, fault notifications link to the Error Index.'
-            : ['telegram', 'discord', 'discord_dm'].includes(prov)
+            : prov === 'telegram'
+                ? 'Adds <b>Web UI</b> and <b>Live Camera</b> links. Leave empty for no links. ' +
+                  'Use an IP address: Telegram drops links to a name without a dot.'
+            : ['discord', 'discord_dm'].includes(prov)
                 ? 'Adds <b>Web UI</b> and <b>Live Camera</b> links. Leave empty for no links.'
                 : 'Adds <b>Web UI</b> and <b>Live Camera</b> buttons. Leave empty for no buttons.';
+    }
+
+    // Telegram refuses links to a host without a dot (the MagicDNS name), so
+    // for Telegram the Tailscale button fills in the Tailscale IP instead
+    function tailscaleAddress() {
+        const m = state.meta;
+        return el('nt-provider').value === 'telegram' ? (m.tailscale_ip || '') : (m.tailscale_host || '');
     }
 
     function updatePublicWarning() {
@@ -514,6 +524,14 @@
         el('nt-tg-token').placeholder = state.has_secret && state.provider === 'telegram' ? 'Saved (leave empty to keep)' : '123456789:ABC...';
         updatePublicWarning();
         updateAuth();
+        // The Tailscale name in the field becomes the Tailscale IP for
+        // Telegram, and back again for anything else
+        const url = el('nt-printer-url');
+        const m = state.meta, held = url.value.trim().replace(/\/+$/, '').toLowerCase();
+        if (m.tailscale_host && m.tailscale_ip) {
+            if (provider === 'telegram' && held === 'http://' + m.tailscale_host.toLowerCase()) url.value = 'http://' + m.tailscale_ip;
+            else if (provider !== 'telegram' && held === 'http://' + m.tailscale_ip) url.value = 'http://' + m.tailscale_host;
+        }
         updatePrinterUrl();
         if (el('nt-rows').children.length) updateRowDimming();
     }
@@ -639,9 +657,9 @@
                 else if (data.meta.local_ip) el('nt-printer-url').value = 'http://' + data.meta.local_ip;
             }
             el('nt-use-tailscale').disabled = !ts;
-            el('nt-use-tailscale').title = ts ? `http://${ts}` : 'Enable Tailscale under Settings > Remote Access first';
+            el('nt-use-tailscale').title = ts ? 'The Tailscale name (the Tailscale IP for Telegram)' : 'Enable Tailscale under Settings > Remote Access first';
             el('nt-use-tailscale').onclick = () => {
-                el('nt-printer-url').value = 'http://' + ts;
+                el('nt-printer-url').value = 'http://' + (tailscaleAddress() || ts);
                 updatePrinterUrl();
             };
             updatePrinterUrl();

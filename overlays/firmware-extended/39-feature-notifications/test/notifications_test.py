@@ -803,6 +803,15 @@ def run_config_tests():
     bad(dict(provider="ntfy", server="https://ntfy.sh", topic="short"),
         "rejects a short topic on the public server")
     bad(dict(provider="telegram", secret="nope"), "rejects a bad bot token")
+    bad(dict(provider="telegram", secret="12345:" + "A" * 35,
+             telegram_chat="123", printer_url="http://u1"),
+        "rejects a dot-less printer host for Telegram (links are dropped)")
+    nc.validate(dict(provider="telegram", secret="12345:" + "A" * 35,
+                     telegram_chat="123", printer_url="http://100.64.0.10"),
+                nc.load())
+    nc.validate(dict(provider="ntfy", server="https://ntfy.example.com",
+                     topic="u1", printer_url="http://u1"), nc.load())
+    check("a dot-less printer host is fine for the other services", True)
     bad(dict(provider="discord", secret="https://example.com/x"),
         "rejects a URL that isn't a Discord webhook")
 

@@ -281,7 +281,9 @@ notification as their subject.
      available when [Tailscale](vpn.md) is enabled and logged in. The name is
      used rather than the Tailscale IP because the IP changes if Tailscale is
      turned off and on again in Firmware Config (the printer rejoins as a new
-     device). The name needs MagicDNS, which is on by default.
+     device). The name needs MagicDNS, which is on by default. **Telegram** is
+     the exception: it drops links to a host without a dot, so with Telegram
+     the button fills in the Tailscale IP instead (and a name is refused).
    - **Use local IP** fills in the printer's LAN address. The links then only
      work while your phone is on the same network as the printer.
 5. Choose which notifications you want (**Push** and/or **Email**), with

@@ -595,6 +595,14 @@ def validate(data, current):
         raise ConfigError("Invalid time zone")
     if s["printer_url"] and not RX_PRINTER_URL.fullmatch(s["printer_url"]):
         raise ConfigError("Printer URL must look like http://100.64.0.1")
+    if s["printer_url"] and s["provider"] == "telegram" and s["push_enabled"] \
+            and "." not in urlparse(s["printer_url"]).hostname.strip("[]") \
+            and ":" not in urlparse(s["printer_url"]).hostname:
+        # Telegram drops text links whose host has no dot (a bare MagicDNS
+        # name): the text stays, the link is gone
+        raise ConfigError("Telegram doesn't link to a name without a dot, "
+                          "such as http://u1. Use the Tailscale IP (Use "
+                          "Tailscale) or the local IP.")
 
     validate_email(s)
     if s["webhook_enabled"]:
@@ -1143,23 +1151,26 @@ def local_ip():
         return ""
 
 
-def tailscale_host():
-    """MagicDNS name of this printer, if Tailscale is enabled and running."""
+def tailscale_info():
+    """(MagicDNS name, IPv4) of this printer, if Tailscale is enabled and
+    running; ("", "") otherwise."""
     if read_cfg().get("remote_access", "vpn", fallback="none").strip() \
             != "tailscale":
-        return ""
+        return "", ""
     try:
         out = subprocess.run(["/usr/local/bin/tailscale", "status", "--json"],
                              capture_output=True, text=True, timeout=5)
         st = json.loads(out.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return ""
+        return "", ""
     if st.get("BackendState") != "Running":
-        return ""
+        return "", ""
     me = st.get("Self") or {}
     dns = (me.get("DNSName") or "").rstrip(".")
     # The short MagicDNS name resolves on devices with MagicDNS enabled
-    return dns.split(".")[0] if dns else (me.get("HostName") or "")
+    host = dns.split(".")[0] if dns else (me.get("HostName") or "")
+    ip = next((a for a in me.get("TailscaleIPs") or [] if ":" not in a), "")
+    return host, ip
 
 
 def cmd_status():
@@ -1187,6 +1198,7 @@ def cmd_status():
 
 
 def cmd_get():
+    ts_host, ts_ip = tailscale_info()
     s = load()
     stored_error = ""
     try:
@@ -1205,7 +1217,8 @@ def cmd_get():
         "providers": PROVIDERS,
         "cameras": camera_status(),
         "local_ip": local_ip(),
-        "tailscale_host": tailscale_host(),
+        "tailscale_host": ts_host,
+        "tailscale_ip": ts_ip,
         "lift_mm": LIFT_MM,
         # The saved settings no longer pass validation (e.g. after an
         # update): the generated config is left as it was until fixed

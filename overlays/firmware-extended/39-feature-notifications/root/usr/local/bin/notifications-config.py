@@ -75,6 +75,8 @@ COMPONENTS_DIR = os.environ.get(
     "NOTIFICATIONS_COMPONENTS", "/home/lava/moonraker/moonraker/components")
 AUTH_MODES = ["none", "token", "basic"]
 
+# Rows that can have a picture but don't by default
+IMAGE_OFF_BY_DEFAULT = {"driver_hot"}
 # id, label, icon, default push, default priority, image ("render",
 # "snapshot", "spool" (drawn spool picture) or None), group, default email
 ROWS = [
@@ -109,8 +111,8 @@ ROWS = [
      True),
     # X or Y stepper driver at or over the set temperature; once per print
     # job, again after a pause
-    ("driver_hot", "Driver running hot", "🌡️", True, "high", None, "fault",
-     True),
+    ("driver_hot", "Driver running hot", "🌡️", True, "max", "snapshot",
+     "fault", True),
     # Need the Spoolman integration
     ("filament_short", "Not enough filament", "🧵", True, "high", "spool",
      "spoolman", True),
@@ -219,7 +221,9 @@ def defaults():
         "email_from": "",
         "email_to": "",
         "rows": {r[0]: {"enabled": r[3], "priority": r[4],
-                        "image": r[5] is not None, "email": r[7]}
+                        "image": r[5] is not None
+                        and r[0] not in IMAGE_OFF_BY_DEFAULT,
+                        "email": r[7]}
                  for r in ROWS},
     }
 

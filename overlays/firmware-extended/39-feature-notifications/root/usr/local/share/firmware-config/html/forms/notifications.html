@@ -690,7 +690,7 @@
             } catch (e) { busy = true; }
             if (!busy) return true;
             return new Promise(resolve => showConfirmModal('Save during a print job?',
-                'Saving may restart the printer UI. This should not impact the print job.\n\nContinue?',
+                'Saving may restart the printer UI (Moonraker). This should not impact the print job.\n\nContinue?',
                 () => resolve(true), () => resolve(false)));
         },
 

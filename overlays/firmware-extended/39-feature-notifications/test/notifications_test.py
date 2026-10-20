@@ -627,18 +627,18 @@ async def test_calibration():
             {"machine_state_manager": {"main_state": state}}, 0)
     await msm(3)                   # bed levelling from the touchscreen
     await msm(3)
-    await msm(1)                   # back to idle
+    await msm(0)                   # back to idle
     await asyncio.sleep(0.3)
     check("a touchscreen calibration ending in idle is reported, by name",
           [e["title"] for e in log] == ["🛠️ U1 Bed levelling complete"],
           [e["title"] for e in log])
     await msm(5)
-    await msm(0)                   # ends somewhere other than idle
+    await msm(9)                   # ends somewhere other than idle
     await asyncio.sleep(0.3)
     check("one that doesn't end in idle isn't", len(log) == 1)
     await start_job(server)        # the start routine's bed mesh
     await msm(3)
-    await msm(1)
+    await msm(1)                   # back to printing
     await asyncio.sleep(0.3)
     check("the bed mesh inside a print job isn't", len(log) == 1,
           [e["title"] for e in log])

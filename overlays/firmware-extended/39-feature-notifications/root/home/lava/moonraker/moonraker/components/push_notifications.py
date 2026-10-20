@@ -126,10 +126,11 @@ TITLES = {
 IMAGE_KINDS = ("render", "snapshot", "spool", "none")
 # machine_state_manager.main_state values of the manual calibrations run
 # from the touchscreen (klippy/extras/machine_state_manager.py); the
-# calibration is complete when the state leaves them (IDLE = 1)
+# calibration is complete when the state goes back to IDLE (0; PRINTING
+# is 1, seen in the Moonraker log as "machine state: {...}")
 CALIBRATIONS = {2: "XYZ offset calibration", 3: "Bed levelling",
                 4: "Flow calibration", 5: "Input shaper calibration"}
-MSM_IDLE = 1
+MSM_IDLE = 0
 FAULT_ROWS = ("error", "warning", "shutdown")
 ERROR_INDEX_URL = ("https://wiki.snapmaker.com/en/snapmaker_u1/"
                    "troubleshooting/u1_error_codes")
@@ -1198,7 +1199,7 @@ class PushNotifications:
         what = CALIBRATIONS[done]
         self._spawn(self._send(
             "calibration", self._title("calibration", what=what),
-            "The printer is idle again.", camera_wait=0.))
+            "Printer is idle.", camera_wait=0.))
 
     async def _on_exception(self, excep: Dict[str, Any]) -> None:
         if fault_key(excep) == self._stale_fault:

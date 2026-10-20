@@ -1043,10 +1043,9 @@ gcode:
     {{% set lift = [{LIFT_MM}, {LIFT_CEILING} - z]|min %}}
     {{% if "z" in th.homed_axes and lift > 0 %}}
     SAVE_GCODE_STATE NAME=ntfy_lift
+    # Straight up only: the filament is never retracted here (the slicer's
+    # and the printer's own retraction are left as they are)
     G91
-    {{% if th.extruder and printer[th.extruder].can_extrude %}}
-    G1 E-1 F1800
-    {{% endif %}}
     G1 Z{{lift}} F600
     RESTORE_GCODE_STATE NAME=ntfy_lift
     {{% endif %}}

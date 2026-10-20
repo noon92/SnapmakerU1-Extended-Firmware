@@ -79,12 +79,27 @@
                 <label for="nt-provider">Push service</label>
                 <select class="nt-input" id="nt-provider">
                     <option value="ntfy">ntfy</option>
+                    <option value="gotify">Gotify</option>
                     <option value="pushover">Pushover</option>
                     <option value="telegram">Telegram</option>
                     <option value="discord_dm">Discord (direct message)</option>
                     <option value="discord">Discord (server channel)</option>
                 </select>
                 <div class="nt-hint" id="nt-provider-hint"></div>
+            </div>
+        </div>
+        <div class="nt-grid" id="nt-gotify">
+            <div class="nt-field">
+                <label for="nt-gt-server">Server URL</label>
+                <input class="nt-input" id="nt-gt-server" placeholder="https://gotify.example.com" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="nt-field">
+                <label for="nt-gt-token">App token</label>
+                <div class="nt-secret">
+                    <input class="nt-input" id="nt-gt-token" type="password" autocomplete="new-password" spellcheck="false">
+                    <button type="button" class="btn btn-secondary" data-toggle="nt-gt-token">Show</button>
+                </div>
+                <div class="nt-hint">In the Gotify web UI: Apps &gt; Create Application.</div>
             </div>
         </div>
         <div class="nt-grid" id="nt-pushover">
@@ -404,6 +419,7 @@
 
     const PROVIDER_HINTS = {
         ntfy: '<a href="https://ntfy.sh" target="_blank">ntfy</a>: free and open source; use the public server or host your own.',
+        gotify: '<a href="https://gotify.net" target="_blank">Gotify</a>: free and open source, on your own server. Text only: Gotify can\'t show pictures (email and the webhook still get them).',
         pushover: '<a href="https://pushover.net" target="_blank">Pushover</a>: one-time purchase per platform after a 30-day trial.',
         telegram: '<a href="https://telegram.org" target="_blank">Telegram</a>: free; notifications come from your own bot, in a private chat or a group. Low and min priority arrive silently.',
         discord_dm: '<a href="https://discord.com" target="_blank">Discord</a>: free; direct messages from your own bot. Low and min priority arrive silently.',
@@ -483,7 +499,7 @@
         const prov = el('nt-provider').value;
         el('nt-printer-url-hint').innerHTML = prov === 'pushover'
             ? 'Adds a <b>Web UI</b> link. Without it, fault notifications link to the Error Index.'
-            : ['telegram', 'discord', 'discord_dm'].includes(prov)
+            : ['gotify', 'telegram', 'discord', 'discord_dm'].includes(prov)
                 ? 'Adds <b>Web UI</b> and <b>Live Camera</b> links. Leave empty for no links.'
                 : 'Adds <b>Web UI</b> and <b>Live Camera</b> buttons. Leave empty for no buttons.';
         // Telegram drops links to a host without a dot, so the script sends
@@ -518,6 +534,8 @@
         el('nt-ntfy').style.display = provider === 'ntfy' ? '' : 'none';
         el('nt-provider-hint').innerHTML = PROVIDER_HINTS[provider] || '';
         el('nt-pushover').style.display = provider === 'pushover' ? '' : 'none';
+        el('nt-gotify').style.display = provider === 'gotify' ? '' : 'none';
+        el('nt-gt-token').placeholder = state.has_secret && state.provider === 'gotify' ? 'Saved (leave empty to keep)' : '';
         el('nt-po-token').placeholder = state.has_secret && state.provider === 'pushover' ? 'Saved (leave empty to keep)' : '';
         el('nt-telegram').style.display = provider === 'telegram' ? '' : 'none';
         el('nt-discord').style.display = provider === 'discord' ? '' : 'none';
@@ -565,6 +583,7 @@
             };
             el('nt-provider').value = data.provider;
             el('nt-po-user').value = data.pushover_user;
+            el('nt-gt-server').value = data.gotify_server || '';
             el('nt-po-device').value = data.pushover_device;
             el('nt-tg-chat').value = data.telegram_chat || '';
             el('nt-dc-user').value = data.discord_user || '';
@@ -738,6 +757,10 @@
                 if (enabled && !el('nt-po-user').value.trim()) throw new Error('Enter your Pushover user key.');
                 secret = el('nt-po-token').value.trim();
                 if (enabled && !secret && !keepSecret) throw new Error('Enter the Pushover application API token.');
+            } else if (provider === 'gotify') {
+                if (enabled && !el('nt-gt-server').value.trim()) throw new Error('Enter the Gotify server URL.');
+                secret = el('nt-gt-token').value.trim();
+                if (enabled && !secret && !keepSecret) throw new Error('Enter the Gotify app token.');
             } else if (provider === 'telegram') {
                 secret = el('nt-tg-token').value.trim();
                 if (enabled && !secret && !keepSecret) throw new Error('Enter the Telegram bot token from @BotFather.');
@@ -763,6 +786,7 @@
                 enabled, push_enabled: pushEnabled, provider, server, topic, auth,
                 pushover_user: el('nt-po-user').value.trim(),
                 pushover_device: el('nt-po-device').value.trim(),
+                gotify_server: el('nt-gt-server').value.trim().replace(/\/+$/, ''),
                 telegram_chat: el('nt-tg-chat').value.trim(),
                 discord_user: el('nt-dc-user').value.trim(),
                 discord_mention: el('nt-dc-mention').value.trim().replace(/^@/, ''),

@@ -3,7 +3,7 @@
 # SPDX-PackageHomePage: https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware
 # SPDX-FileCopyrightText: Copyright (c) 2026 @noon92
 
-# Push notifications (ntfy, Pushover, Telegram or Discord), email and a webhook notifications (SMTP)
+# Push notifications (ntfy, Gotify, Pushover, Telegram or Discord), email (SMTP) and a webhook
 # configuration.
 #
 # `[notifications]` in extended2.cfg is the single source of truth. This tool:
@@ -58,12 +58,15 @@ ERROR_INDEX_URL = ("https://wiki.snapmaker.com/en/snapmaker_u1/"
 SNAPSHOT_PATH = {"internal": "/webcam/snapshot.jpg",
                  "usb": "/webcam2/snapshot.jpg"}
 LIVE_PATH = {"internal": "/webcam/webrtc", "usb": "/webcam2/webrtc"}
-PROVIDERS = ["ntfy", "pushover", "telegram", "discord", "discord_dm"]
+PROVIDERS = ["ntfy", "gotify", "pushover", "telegram", "discord",
+             "discord_dm"]
 EMAIL_SECURITY = ["starttls", "ssl", "none"]
 PRIORITIES = ["min", "low", "default", "high", "max"]
 # Pushover emergency (2) repeats until acknowledged, beyond ntfy's "max";
 # both high and max map to Pushover high priority.
 PUSHOVER_PRIORITY = {"min": -2, "low": -1, "default": 0, "high": 1, "max": 1}
+GOTIFY_PRIORITY = {"min": "low", "low": "moderate", "default": "normal",
+                   "high": "high", "max": "emergency"}
 # Telegram has no priorities: min and low arrive without a sound
 TELEGRAM_SILENT = ("min", "low")
 TELEGRAM_API = "https://api.telegram.org/bot"
@@ -138,6 +141,10 @@ RX_TOPIC = re.compile(r"[A-Za-z0-9_\-]{1,64}")
 RX_TOKEN = re.compile(r"[A-Za-z0-9_\-]{1,128}")
 RX_USER = re.compile(r"[^\s:]{1,64}")
 RX_PUSHOVER_KEY = re.compile(r"[A-Za-z0-9]{20,40}")
+# Gotify server (may sit under a path behind a proxy) and app token
+RX_GOTIFY_SERVER = re.compile(
+    r"https?://[A-Za-z0-9.\-]+(:\d{1,5})?(/[A-Za-z0-9._~\-/]*)?")
+RX_GOTIFY_TOKEN = re.compile(r"[A-Za-z0-9._\-]{8,64}")
 RX_PUSHOVER_DEVICE = re.compile(r"[A-Za-z0-9_\-]{0,25}")
 RX_TELEGRAM_TOKEN = re.compile(r"\d{5,16}:[A-Za-z0-9_\-]{30,64}")
 RX_TELEGRAM_CHAT = re.compile(r"-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31}")
@@ -161,6 +168,7 @@ SEND_CONNECT_TIMEOUT = 10.   # match push_notifications.py
 SEND_READ_TIMEOUT = 60.
 STRING_FIELDS = ("provider", "server", "topic", "auth", "username",
                  "pushover_user", "pushover_device", "telegram_chat",
+                 "gotify_server",
                  "discord_user", "discord_mention", "printer_url",
                  "camera", "name", "timezone", "first_layer_objects",
                  "complete_objects",
@@ -195,6 +203,7 @@ def defaults():
         "username": "",
         "pushover_user": "",
         "pushover_device": "",
+        "gotify_server": "",
         "telegram_chat": "",
         "discord_user": "",
         "discord_mention": "",
@@ -425,6 +434,7 @@ def section_lines(s):
         f"username: {s['username']}",
         f"pushover_user: {s['pushover_user']}",
         f"pushover_device: {s['pushover_device']}",
+        f"gotify_server: {s['gotify_server']}",
         f"telegram_chat: {s['telegram_chat']}",
         f"discord_user: {s['discord_user']}",
         f"discord_mention: {s['discord_mention']}",
@@ -650,6 +660,20 @@ def validate(data, current):
             s["username"] = ""
         if s["auth"] == "none":
             s["secret"] = ""
+    elif s["provider"] == "gotify":
+        if s["enabled"] or s["gotify_server"]:
+            if not RX_GOTIFY_SERVER.fullmatch(s["gotify_server"]):
+                raise ConfigError("Gotify server must look like "
+                                  "https://gotify.example.com")
+            try:
+                urlparse(s["gotify_server"]).port
+            except ValueError:
+                raise ConfigError("Gotify server: port out of range")
+        if s["enabled"] or s["secret"]:
+            if not RX_GOTIFY_TOKEN.fullmatch(s["secret"]):
+                raise ConfigError("Gotify app token is missing or invalid "
+                                  "(Gotify web UI > Apps > Create "
+                                  "Application)")
     elif s["provider"] == "telegram":
         if s["enabled"] or s["secret"]:
             if not RX_TELEGRAM_TOKEN.fullmatch(s["secret"]):
@@ -729,6 +753,8 @@ def secret_scope(s):
     """What a stored push secret is bound to."""
     if s["provider"] == "ntfy":
         return f"ntfy|{s['auth']}|{s['server'].lower()}|{s['username']}"
+    if s["provider"] == "gotify":
+        return f"gotify|{s['gotify_server'].lower().rstrip('/')}"
     return s["provider"]
 
 
@@ -739,6 +765,8 @@ def push_configured(s):
         return bool(s["server"] and s["topic"])
     if s["provider"] == "pushover":
         return bool(s["pushover_user"] and s["secret"])
+    if s["provider"] == "gotify":
+        return bool(s["gotify_server"] and s["secret"])
     if s["provider"] == "telegram":
         return bool(s["secret"] and s["telegram_chat"])
     if s["provider"] == "discord":
@@ -796,6 +824,18 @@ def row_url(s, rid, priority, cam, sec=None):
         device = f"/{s['pushover_device']}" if s["pushover_device"] else ""
         token = sec.put("push_token", s["secret"])
         return (f"pover://{s['pushover_user']}@{token}{device}"
+                f"?{query(params)}")
+    if s["provider"] == "gotify":
+        # Markdown, links in the text (push_notifications adds them); no
+        # pictures: Gotify messages can't carry attachments
+        u = urlparse(s["gotify_server"])
+        scheme = "gotifys" if u.scheme == "https" else "gotify"
+        port = f":{u.port}" if u.port else ""
+        path = (u.path or "/").rstrip("/") + "/"
+        token = sec.put("push_token", s["secret"])
+        params = {"priority": GOTIFY_PRIORITY[priority],
+                  "format": "markdown"}
+        return (f"{scheme}://{u.hostname}{port}{path}{token}"
                 f"?{query(params)}")
     if s["provider"] == "telegram":
         # Sent as HTML, links in the text (push_notifications adds them);
@@ -971,7 +1011,7 @@ def render_moonraker(s, sec=None):
         out.append(f"filament_low_grams: {s['filament_low_grams']}")
     # Links in the text: email and Telegram have no buttons
     text_links = email or (push and s["provider"] in (
-        "telegram", "discord", "discord_dm"))
+        "gotify", "telegram", "discord", "discord_dm"))
     if text_links and s["printer_url"]:
         root = printer_root(s)
         out.append(f"web_ui_url: {root}/")
@@ -984,7 +1024,8 @@ def render_moonraker(s, sec=None):
                      and s["complete_objects"] == "each" else [rid]):
             if rid in push:
                 url = row_url(s, rid, s["rows"][rid]["priority"], cam, sec)
-                out.append(f"{name}: {kind}, {url}")
+                pkind = "none" if s["provider"] == "gotify" else kind
+                out.append(f"{name}: {pkind}, {url}")
             if rid in email:
                 out.append(f"{name}_email: {kind}, {email_url(s, sec)}")
             if rid in hook:
@@ -1582,6 +1623,7 @@ def cmd_test():
     dests = []
     if push_configured(s):
         target = {"ntfy": f"{s['server']}/{s['topic']}",
+                  "gotify": s["gotify_server"],
                   "pushover": "Pushover",
                   "telegram": f"Telegram chat {s['telegram_chat']}",
                   "discord": "the Discord channel",
@@ -1597,6 +1639,9 @@ def cmd_test():
             d = discord_module()
             text = body + "\n\n" + " · ".join(
                 d.link(t, u) for t, u in links(s, "test", cam))
+        elif s["provider"] == "gotify":
+            text = body + "\n\n" + " · ".join(
+                f"[{t}]({u})" for t, u in links(s, "test", cam))
         dests.append((target, row_url(s, "test", "default", cam),
                       text.strip()))
     if email_configured(s):
@@ -1634,7 +1679,9 @@ def cmd_test():
                                               SEND_READ_TIMEOUT)
             col.lines = []
             print(f"\nSending to {target}...", flush=True)
-            ok = ap.notify(title=title, body=text, attach=path)
+            # Gotify can't carry attachments: text only
+            ok = ap.notify(title=title, body=text,
+                           attach=None if url.startswith("gotify") else path)
             if not ok and path:
                 print("Sending failed; retrying without the image",
                       flush=True)

@@ -6,7 +6,7 @@ title: Push Notifications
 
 Print, progress and error notifications with camera snapshots, sent to your
 phone through [ntfy](https://ntfy.sh) (the public `ntfy.sh` server or your own),
-[Pushover](https://pushover.net), [Telegram](https://telegram.org),
+[Gotify](https://gotify.net) (text only), [Pushover](https://pushover.net), [Telegram](https://telegram.org),
 [Discord](https://discord.com), and/or by email (Gmail, Brevo or any SMTP
 server), and/or to a webhook for home automation.
 
@@ -108,6 +108,7 @@ errors by push and email. By default, faults and power loss are also emailed.
 |---|---|---|
 | **ntfy.sh** (public server) | None: pick a topic and subscribe to it in the [ntfy app](https://docs.ntfy.sh/subscribe/phone/) | **Public**: anyone who knows or guesses the topic can read the notifications, including images and file names |
 | **ntfy** (your own server) | [Self-host ntfy](https://docs.ntfy.sh/install/) | Private, with access control |
+| **Gotify** | [Self-host Gotify](https://gotify.net/docs/install), create an application in its web UI for the app token. Text only (see [Gotify](#gotify)) | Private, on your own server |
 | **Pushover** | Pushover account and app (30-day free trial, then a one-time purchase per platform), plus an application token | Private to your account |
 | **Telegram** | A bot of your own, made in Telegram in a minute (see [Telegram](#telegram)) | Private chat with your bot, or a group you choose |
 | **Discord (direct message)** | A bot of your own in the Discord Developer Portal, added to a server you are in (see [Discord](#discord)) | Direct messages to you |
@@ -120,11 +121,25 @@ testing; for everyday use, setting up your own ntfy server is a good idea. On
 the public server, use a long, unguessable topic: the **Random** button
 creates one, and topics shorter than 16 characters are rejected.
 
+On Gotify, **Min** to **Max** are Gotify's priorities 0, 3, 5, 8 and 10 (low,
+moderate, normal, high, emergency); how the Gotify app treats each is set in
+the app.
+
 On Pushover, **High** and **Max** both use Pushover's high priority. Pushover's
 emergency priority, which repeats until acknowledged, is not used.
 
 Telegram and Discord have no priorities: **Min** and **Low** notifications
 arrive without a sound, the others normally.
+
+### Gotify
+
+Enter the server URL (e.g. `https://gotify.example.com`, or with a path if it
+sits behind a reverse proxy under one) and an app token: in the Gotify web UI,
+**Apps > Create Application**. Notifications are Markdown, with the Web UI and
+Live Camera links in the text when a Printer URL is set.
+
+Gotify messages can't carry attachments, so Gotify gets **no pictures**,
+whatever the Image column says; email and the webhook still get them.
 
 ### Telegram
 
@@ -267,6 +282,8 @@ notification as their subject.
      subscribe to it in the ntfy app. On your own server, choose
      **Authentication**: none, an access token (`tk_...`), or username &
      password.
+   - **Gotify**: enter the **Server URL** and an **App token** (see
+     [Gotify](#gotify)).
    - **Pushover**: enter your **User key** and the **Application API token**,
      and optionally a device name.
    - **Telegram**: see [Telegram](#telegram).

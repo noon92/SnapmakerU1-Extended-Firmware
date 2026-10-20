@@ -503,6 +503,7 @@ class PushNotifications:
                         srv.socket_connect_timeout, SEND_CONNECT_TIMEOUT)
                 channel = "email" if email else url.split(":", 1)[0]
                 channel = {"ntfys": "ntfy", "pover": "pushover",
+                           "gotifys": "gotify",
                            "tgram": "telegram", "discordhook": "discord",
                            "discorddm": "discord", "json": "webhook",
                            "jsons": "webhook"}.get(
@@ -740,12 +741,29 @@ class PushNotifications:
             return self._email_prepare(rid, title, body, path)
         if dest.channel == "telegram":
             title, body = self._telegram_prepare(rid, title, body)
+        elif dest.channel == "gotify":
+            body = self._gotify_markdown(body.strip() or title)
+            links = " · ".join(f"[{self._md_escape(t)}]({u})"
+                               for t, u in self._links(rid))
+            if links:
+                body += "\n\n" + links
         elif dest.channel == "discord" and discord is not None:
             body = discord.escape(body.strip() or title)
             links = " · ".join(discord.link(t, u) for t, u in self._links(rid))
             if links:
                 body += "\n\n" + links
         return title, body, {}
+
+    @staticmethod
+    def _md_escape(text: str) -> str:
+        return re.sub(r"([\\`*_\[\]<>#|~])", r"\\\1", text)
+
+    def _gotify_markdown(self, text: str) -> str:
+        """Gotify shows Markdown: escape it, and keep line breaks (a single
+        newline is a space in Markdown)."""
+        return "\n\n".join(
+            "  \n".join(self._md_escape(line) for line in para.split("\n"))
+            for para in text.split("\n\n"))
 
     def _email_prepare(
         self, rid: str, title: str, body: str, path: Optional[str] = None
@@ -884,6 +902,8 @@ class PushNotifications:
         what = f"{rid} ({dest.channel})"
         ap = dest.ap
         body = body.strip() or title
+        if dest.channel == "gotify":
+            path = None         # Gotify messages can't carry attachments
         ok = False
         attempts = 1 + len(SEND_RETRY_DELAYS)
         kind = NOTIFY_TYPES.get(rid, "info")

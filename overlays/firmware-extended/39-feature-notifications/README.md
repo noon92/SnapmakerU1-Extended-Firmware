@@ -1,7 +1,7 @@
 # 39-feature-notifications: Push Notifications
 
 Print, progress, fault and filament notifications with images, sent through
-[Apprise](https://github.com/caronc/apprise) to ntfy, Pushover, Telegram,
+[Apprise](https://github.com/caronc/apprise) to ntfy, Gotify, Pushover, Telegram,
 Discord, email or a webhook. Configured from Firmware Config
 (**Settings > Monitoring & Debugging > Push Notifications > Configure**).
 User documentation: [docs/notifications.md](../../../docs/notifications.md).

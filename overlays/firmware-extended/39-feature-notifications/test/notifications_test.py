@@ -683,6 +683,28 @@ async def test_calibration():
     check("nothing during a print job", log == [], titles())
 
 
+async def test_gotify():
+    print("Gotify: Markdown text, links, never an image")
+    reset_world()
+    log = []
+    gotify, ntfy = FakeService(log, "gotify"), FakeService(log, "ntfy")
+    server, c = make({"web_ui_url": "http://u1/"},
+                     {"paused": [("gotify", gotify, False),
+                                 ("ntfy", ntfy, False)]})
+    await start_job(server, "my_part_v2.gcode")
+    await server.handlers["job_state:state_changed"](
+        JobEvent.PAUSED, {}, ps("paused", "my_part_v2.gcode"))
+    await asyncio.sleep(3.6)
+    g = [e for e in log if e["channel"] == "gotify"]
+    n = [e for e in log if e["channel"] == "ntfy"]
+    check("Gotify gets no attachment while ntfy does",
+          g and g[0]["attach"] is None and n and n[0]["attach"], log)
+    check("Gotify text is escaped Markdown with the links",
+          g and "my\\_part\\_v2" in g[0]["body"]
+          and "[Web UI](http://u1/)" in g[0]["body"],
+          g and g[0]["body"])
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -854,7 +876,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_driver_hot,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:
@@ -894,6 +916,26 @@ def run_config_tests():
     bad(dict(provider="ntfy", server="https://ntfy.sh", topic="short"),
         "rejects a short topic on the public server")
     bad(dict(provider="telegram", secret="nope"), "rejects a bad bot token")
+    bad(dict(provider="gotify", gotify_server="ftp://x", secret="A" * 15),
+        "Gotify: rejects a server that isn't http(s)")
+    bad(dict(provider="gotify", gotify_server="https://g.example.com:99999",
+             secret="A" * 15), "Gotify: rejects a port out of range")
+    bad(dict(provider="gotify", gotify_server="https://g.example.com",
+             secret="no"), "Gotify: rejects a bad app token")
+    g = nc.validate(dict(enabled=True, provider="gotify",
+                         gotify_server="https://g.example.com:8443/gotify/",
+                         secret="AbC.dEf-123_xyz", printer_url="http://u1"),
+                    nc.load())
+    gurl = nc.row_url(g, "error", "max", True)
+    check("Gotify: URL with port, path, priority and Markdown",
+          gurl == "gotifys://g.example.com:8443/gotify/AbC.dEf-123_xyz"
+                  "?priority=emergency&format=markdown", gurl)
+    gmoon = nc.render_moonraker(g, nc.SecretBag())
+    check("Gotify: no pictures, links in the text, token as a secret",
+          "error: none, gotifys://g.example.com:8443/gotify/"
+          "{secrets.notifications.push_token}" in gmoon
+          and "web_ui_url: http://u1/" in gmoon
+          and "AbC.dEf-123_xyz" not in gmoon, gmoon)
     bad(dict(provider="telegram", secret="12345:" + "A" * 35,
              telegram_chat="123", printer_url="http://u1"),
         "rejects a dot-less printer host for Telegram (links are dropped)")

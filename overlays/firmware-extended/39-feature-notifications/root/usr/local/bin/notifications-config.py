@@ -1459,8 +1459,11 @@ def cmd_save():
     write_secrets(dict(sec.values, **{k: s[k] for k in SECRET_FIELDS},
                        secret_for=s["secret_for"]))
     print("Settings saved.")
+    if push_configured(s) and s["provider"] == "gotify":
+        print("WARNING: Text only: picture attachments not supported by "
+              "Gotify.")
     if configured(s) and not camera_status()[s["camera"]]:
-        print(f"NOTE: the {s['camera']} camera has no snapshot service "
+        print(f"WARNING: the {s['camera']} camera has no snapshot service "
               "running; notifications will be sent without camera images.")
     # Services only read their config at start, so writing now is safe
     # even mid-print; the service hooks re-render the same content later.
@@ -1651,6 +1654,9 @@ def cmd_test():
         dests.append(("the webhook", webhook_url(s, "test", cam), body))
     if not dests:
         raise ConfigError("Set up a push service, email or a webhook first")
+    if push_configured(s) and s["provider"] == "gotify":
+        print("WARNING: Text only: picture attachments not supported by "
+              "Gotify.")
     print("Taking a camera snapshot...")
     path = fetch_snapshot(s)
     for n, (target, url, text) in enumerate(dests):

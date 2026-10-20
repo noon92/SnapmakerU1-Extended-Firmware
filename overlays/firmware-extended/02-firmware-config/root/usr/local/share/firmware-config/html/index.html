@@ -70,6 +70,7 @@
         .modal-status { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
         .modal-status.success { color: var(--success); }
         .modal-status.error { color: var(--error); }
+        .modal-log .log-warn { color: var(--error); font-weight: 600; }
         .modal-log { background: #0d0d0d; border-radius: 6px; padding: 12px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; height: 300px; overflow-y: auto; margin-bottom: 16px; display: none; }
         .modal-log.visible { display: block; }
         .modal-buttons { display: flex; gap: 12px; justify-content: flex-end; }
@@ -536,6 +537,7 @@
             $('action-message').textContent = message;
             $('action-message').style.color = '';
             $('action-log').textContent = '';
+            logPending = ''; logTail = null;
             $('action-log').classList.remove('visible');
             $('action-progress').classList.remove('visible');
             $('action-progress-fill').style.width = '0%';
@@ -554,9 +556,28 @@
             $('action-close-btn').disabled = false;
         }
 
+        // Output lines starting with ERROR or WARNING are shown in red. The
+        // output arrives in chunks, so the unfinished last line is kept as
+        // plain text until its newline comes.
+        let logPending = '', logTail = null;
+        const LOG_WARN = /^\s*(ERROR|WARNING)\b/;
         function appendLog(text) {
             const el = $('action-log');
-            el.textContent += text;
+            if (logTail) logTail.remove();
+            const lines = (logPending + text).split('\n');
+            logPending = lines.pop();
+            lines.forEach(line => {
+                if (LOG_WARN.test(line)) {
+                    const span = document.createElement('span');
+                    span.className = 'log-warn';
+                    span.textContent = line + '\n';
+                    el.appendChild(span);
+                } else {
+                    el.appendChild(document.createTextNode(line + '\n'));
+                }
+            });
+            logTail = document.createTextNode(logPending);
+            el.appendChild(logTail);
             el.scrollTop = el.scrollHeight;
         }
 

@@ -109,7 +109,8 @@ TITLES = {
     "object_complete": "📦 {name} object complete",
     "complete": "✅ {name} complete",
     "cancelled": "🚫 {name} cancelled",
-    "calibration": "🛠️ {name} {what} complete",
+    "calibration": "📐 {name} {what} complete",
+    "intervention": "🖐️ {name} user intervention needed",
     "error": "⚠️ {name} Error: {kind}",
     "warning": "⚠️ {name} Warning",
     "shutdown": "🛑 {name} Error: shutdown",
@@ -131,6 +132,13 @@ IMAGE_KINDS = ("render", "snapshot", "spool", "none")
 CALIBRATIONS = {2: "XYZ offset calibration", 3: "Bed levelling",
                 4: "Flow calibration", 5: "Input shaper calibration"}
 MSM_IDLE = 0
+# action_code values (same file) of the steps that wait for a person:
+# MANUAL_CLEAN_EXTRUDER..3 (brush the nozzle, then tap the screen)
+MANUAL_CLEAN = {192: 1, 193: 2, 194: 3, 195: 4}
+# ...and a calibration sitting at action IDLE (0) this long is the screen
+# waiting for a tap (plate out / plate back in). Machine steps are never
+# reported as idle; the gaps between them are a second or two.
+INTERVENTION_HOLD = 15.
 FAULT_ROWS = ("error", "warning", "shutdown")
 ERROR_INDEX_URL = ("https://wiki.snapmaker.com/en/snapmaker_u1/"
                    "troubleshooting/u1_error_codes")
@@ -529,6 +537,8 @@ class PushNotifications:
             "exclude_object": {}, "machine_state_manager": {},
             **{d: {} for d in DRIVERS}}
         self._calibrating: Optional[int] = None  # main_state of a running one
+        self._cal_action: Optional[int] = None   # its last action_code
+        self._cal_hold = 0                       # bumps on every action change
 
         self.server.register_event_handler(
             "job_state:state_changed", self._on_job_event)
@@ -1178,28 +1188,60 @@ class PushNotifications:
 
     # Event handlers must return quickly; do the waiting in a task.
     def _track_calibration(self) -> None:
-        """A manual calibration (touchscreen: bed levelling, XYZ offset,
-        flow, input shaper) is reported when its machine state ends in
-        idle. The bed mesh inside a print job's start routine sets the same
-        state, so nothing is reported while a print job is active."""
+        """Manual calibrations (touchscreen: bed levelling, XYZ offset,
+        flow, input shaper), one row: "<which> complete" when its machine
+        state ends (idle, or straight into the next queued calibration),
+        and "user intervention needed" when it reaches a step that waits
+        for a person. The bed mesh inside a print job's start routine sets
+        the same state, so nothing is reported while a print job is
+        active."""
         if "calibration" not in self.rows:
             return
-        state = self._status["machine_state_manager"].get("main_state")
+        msm = self._status["machine_state_manager"]
         try:
-            state = int(state)
+            state = int(msm.get("main_state"))
+            action = int(msm.get("action_code") or 0)
         except (TypeError, ValueError):
             return
-        if state in CALIBRATIONS:
-            if self._calibrating is None and not self._job_active:
+        if self._job_active:
+            self._calibrating = self._cal_action = None
+            return
+        if state != self._calibrating:
+            done, self._calibrating = self._calibrating, None
+            self._cal_action = None
+            self._cal_hold += 1
+            if done is not None and (state == MSM_IDLE
+                                     or state in CALIBRATIONS):
+                self._spawn(self._send(
+                    "calibration",
+                    self._title("calibration", what=CALIBRATIONS[done]),
+                    "Printer is idle." if state == MSM_IDLE else
+                    f"{CALIBRATIONS[state]} starts next.", camera_wait=0.))
+            if state in CALIBRATIONS:
                 self._calibrating = state
+            else:
+                return
+        if action == self._cal_action:
             return
-        done, self._calibrating = self._calibrating, None
-        if done is None or self._job_active or state != MSM_IDLE:
-            return
-        what = CALIBRATIONS[done]
-        self._spawn(self._send(
-            "calibration", self._title("calibration", what=what),
-            "Printer is idle.", camera_wait=0.))
+        self._cal_action = action
+        self._cal_hold += 1
+        what = CALIBRATIONS[state]
+        if action in MANUAL_CLEAN:
+            self._spawn(self._send(
+                "calibration", self._title("intervention"),
+                self._lines(what, f"Brush the nozzle of Toolhead "
+                            f"{MANUAL_CLEAN[action]}, then tap the screen."),
+                camera_wait=0.))
+        elif action == 0:
+            self._spawn(self._intervention_hold(self._cal_hold, what))
+
+    async def _intervention_hold(self, hold: int, what: str) -> None:
+        await asyncio.sleep(INTERVENTION_HOLD)
+        if hold != self._cal_hold or self._job_active:
+            return      # the calibration moved on (or ended) meanwhile
+        await self._send("calibration", self._title("intervention"),
+                         self._lines(what, "The screen is waiting for you."),
+                         camera_wait=0.)
 
     async def _on_exception(self, excep: Dict[str, Any]) -> None:
         if fault_key(excep) == self._stale_fault:
@@ -1283,7 +1325,8 @@ class PushNotifications:
                       **{d: ["temperature"] for d in DRIVERS}},
                      **({"print_task_config": PTC_FIELDS}
                         if self._spoolman_active() else {}),
-                     **({"machine_state_manager": ["main_state"]}
+                     **({"machine_state_manager": ["main_state",
+                                                   "action_code"]}
                         if "calibration" in self.rows else {})),
                 self._on_status_update, default={})
         except Exception as e:
@@ -1291,6 +1334,8 @@ class PushNotifications:
             status = {}
         for obj in self._status:
             self._status[obj].update(status.get(obj) or {})
+        self._calibrating = self._cal_action = None   # Klipper restarted
+        self._cal_hold += 1
         ps = self._status["print_stats"]
         if ps.get("state") in ("printing", "paused"):
             # Started before Moonraker: track it without re-notifying

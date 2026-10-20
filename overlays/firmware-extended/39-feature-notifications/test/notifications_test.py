@@ -614,34 +614,65 @@ async def test_time_left():
 
 
 async def test_calibration():
-    print("Calibration complete: manual calibrations only")
+    print("Manual calibrations: complete, and user intervention needed")
     reset_world()
     log = []
     ntfy = FakeService(log, "ntfy")
     server, c = make({}, {"calibration": [("ntfy", ntfy, False)]})
     STATE["print_stats"] = ps("standby")
     await server.handlers["server:klippy_ready"]()
+    nc_hold = sys.modules[type(c).__module__]
+    nc_hold.INTERVENTION_HOLD = 0.2
 
-    async def msm(state):
+    async def msm(state, action=0):
         await c._on_status_update(
-            {"machine_state_manager": {"main_state": state}}, 0)
-    await msm(3)                   # bed levelling from the touchscreen
-    await msm(3)
+            {"machine_state_manager": {"main_state": state,
+                                       "action_code": action}}, 0)
+    titles = lambda: [e["title"] for e in log]
+    await msm(3, 257)              # bed levelling from the touchscreen
+    await msm(3, 258)
+    await msm(3, 256)
     await msm(0)                   # back to idle
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(0.4)
     check("a touchscreen calibration ending in idle is reported, by name",
-          [e["title"] for e in log] == ["🛠️ U1 Bed levelling complete"],
-          [e["title"] for e in log])
-    await msm(5)
+          titles() == ["📐 U1 Bed levelling complete"], titles())
+    log.clear()
+    await msm(2, 1)                # XYZ offset: homing
+    await msm(2, 200)              # auto clean
+    await msm(2, 192)              # brush toolhead 1
+    await msm(2, 201)              # cooling
+    await msm(2, 0)                # the screen waits for a tap
+    await asyncio.sleep(0.4)
+    await msm(2, 196)              # probing
+    await asyncio.sleep(0.1)
+    await msm(2, 0)                # a short gap between machine steps
+    await msm(2, 197)
+    await asyncio.sleep(0.4)
+    check("manual clean and a held idle are user intervention; short gaps "
+          "aren't", titles() == ["🖐️ U1 user intervention needed"] * 2
+          and "Brush the nozzle of Toolhead 1" in log[0]["body"]
+          and "waiting for you" in log[1]["body"], (titles(), [e["body"] for e in log]))
+    log.clear()
+    await msm(5, 384)              # queued: straight into input shaper
+    await msm(0)
+    await asyncio.sleep(0.4)
+    check("a queued calibration completes the previous one",
+          titles() == ["📐 U1 XYZ offset calibration complete",
+                       "📐 U1 Input shaper calibration complete"]
+          and "Input shaper calibration starts next" in log[0]["body"],
+          titles())
+    log.clear()
+    await msm(5, 384)
     await msm(9)                   # ends somewhere other than idle
-    await asyncio.sleep(0.3)
-    check("one that doesn't end in idle isn't", len(log) == 1)
+    await asyncio.sleep(0.4)
+    check("one that doesn't end in idle isn't reported", log == [])
     await start_job(server)        # the start routine's bed mesh
-    await msm(3)
+    await msm(3, 257)
+    await msm(3, 0)
+    await asyncio.sleep(0.4)
     await msm(1)                   # back to printing
     await asyncio.sleep(0.3)
-    check("the bed mesh inside a print job isn't", len(log) == 1,
-          [e["title"] for e in log])
+    check("nothing during a print job", log == [], titles())
 
 
 async def test_driver_hot():

@@ -1045,7 +1045,8 @@ gcode:
     SAVE_GCODE_STATE NAME=ntfy_lift
     # Z only: retraction is the slicer's and the printer's own
     G91
-    G1 Z{{lift}} F600
+    # The U1's max Z speed (30 mm/s): 15 mm takes about half a second
+    G1 Z{{lift}} F1800
     RESTORE_GCODE_STATE NAME=ntfy_lift
     {{% endif %}}
     # Klipper reads G-code ahead of the motion: wait until the toolhead

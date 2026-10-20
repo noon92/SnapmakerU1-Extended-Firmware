@@ -1190,15 +1190,13 @@ def run_config_tests():
     with open(nc.KLIPPER_CFG, "a") as f:
         f.write("# old template\n")
     rc, out = save(dict(base, name="U1b"), busy=True)
-    check("mid-print: a template-only macro change is written and owed",
-          rc == 0 and calls == [] and "firmware update" in out
-          and os.path.exists(nc.PENDING_RESTART["klipper"])
-          and "# old template" not in open(nc.KLIPPER_CFG).read(),
-          (rc, calls, out))
+    check("mid-print: out-of-date print-end macros refuse the save",
+          rc == "ERROR" and "out of date" in out and "Nothing was saved" in out
+          and "# old template" in open(nc.KLIPPER_CFG).read(), (rc, out))
     rc, out = save(dict(base, name="U1b"))
-    check("...and Klipper restarts on the next idle save",
+    check("...and the idle save rewrites them and restarts Klipper",
           rc == 0 and calls == ["S60klipper"]
-          and not os.path.exists(nc.PENDING_RESTART["klipper"]),
+          and "# old template" not in open(nc.KLIPPER_CFG).read(),
           (rc, calls, out))
 
     check("Discord: mention only on high/max",

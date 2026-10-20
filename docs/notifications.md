@@ -50,7 +50,8 @@ errors by push and email. By default, faults and power loss are also emailed.
   (e.g. `Possible Spaghetti Defect Detected`), and an **Error Index** link to the
   [U1 error code reference](https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/u1_error_codes).
 - **Snapshots before parking**: For *Print complete* and *Cancelled*, the
-  snapshot is taken once the nozzle has retracted 1 mm and lifted 15 mm off the part, while the
+  hook retracts 1 mm (whatever the slicer's retraction, including none) and
+  lifts 15 mm off the part, and the snapshot is taken then, while the
   printer's own end/cancel moves carry on, so the image shows the part and the
   nozzle doesn't stop over it and ooze onto it. There is no lift if Z is
   not homed, and the lift is reduced near the top of the build volume so the
@@ -405,11 +406,10 @@ time. Klipper only reads its config at start, so a change to what the
 print-end macros do (*Print complete*, *Print cancelled* and *Error*: on
 or off, email, camera image; the camera, or enabling notifications, push,
 email or the webhook) is refused while printing, naming the settings, and
-nothing is saved until the print job ends. If the macros changed only
-because a firmware update changed their template, the settings are saved
-and Klipper keeps the old macros for the current print job; it loads the
-new ones at its next start. A restart that fails is done on the next
-Save & Apply.
+nothing is saved. A save is also refused while printing when the
+print-end macros on the printer are older than the firmware. Anything that
+is saved takes effect right away. A restart that fails is reported in red
+and done on the next Save & Apply.
 
 For other services
 (Slack, Matrix, etc.), add your own Moonraker

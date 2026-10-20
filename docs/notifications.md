@@ -23,6 +23,7 @@ server), and/or to a webhook for home automation.
 | ⏳ 25% / 50% / 75% complete | Camera | Same percentage as Fluidd and the Snapmaker app, with time left and ETA |
 | ✅ Print complete | Camera | Includes print time. When printing by object: once per object as each one finishes and the next begins ("📦 object complete", with which object, e.g. "Object 2 of 3: Assembly", and time left; the last object's is the Print complete notification itself), or once per print job |
 | 🚫 Print cancelled | Camera | |
+| 🛠️ Calibration complete | Camera | When a calibration started from the touchscreen finishes (bed levelling, XYZ offset, flow, input shaper), naming which. Not for the bed mesh inside a print job's start routine |
 | ⚠️ Error | Camera | Faults that pause or stop a print, e.g. filament runout or a dirty bed |
 | ⚠️ Warning | Camera | Faults that don't stop a print, e.g. a toolhead contact warning |
 | 🛑 Klipper shutdown | Camera | Heater, thermistor and MCU faults, emergency stop |

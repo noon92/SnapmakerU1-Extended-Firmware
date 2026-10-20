@@ -93,6 +93,7 @@ MILESTONES = (25, 50, 75)
 ROW_IDS = (
     "started", "layer_started", "first_layer", "progress_25", "progress_50", "progress_75",
     "paused", "resumed", "object_complete", "complete", "cancelled",
+    "calibration",
     "error", "warning", "shutdown", "power_loss", "driver_hot",
     "filament_short", "filament_low", "spool_switch",
 )
@@ -108,6 +109,7 @@ TITLES = {
     "object_complete": "📦 {name} object complete",
     "complete": "✅ {name} complete",
     "cancelled": "🚫 {name} cancelled",
+    "calibration": "🛠️ {name} {what} complete",
     "error": "⚠️ {name} Error: {kind}",
     "warning": "⚠️ {name} Warning",
     "shutdown": "🛑 {name} Error: shutdown",
@@ -122,6 +124,12 @@ TITLES = {
     "spool_switch": "🔄 {name} switched to backup spool",
 }
 IMAGE_KINDS = ("render", "snapshot", "spool", "none")
+# machine_state_manager.main_state values of the manual calibrations run
+# from the touchscreen (klippy/extras/machine_state_manager.py); the
+# calibration is complete when the state leaves them (IDLE = 1)
+CALIBRATIONS = {2: "XYZ offset calibration", 3: "Bed levelling",
+                4: "Flow calibration", 5: "Input shaper calibration"}
+MSM_IDLE = 1
 FAULT_ROWS = ("error", "warning", "shutdown")
 ERROR_INDEX_URL = ("https://wiki.snapmaker.com/en/snapmaker_u1/"
                    "troubleshooting/u1_error_codes")
@@ -152,6 +160,7 @@ BODY_LIMITS = {"pushover": (True, 1024), "ntfy": (False, 4000),
                "telegram": (True, 3500), "discord": (True, 3500)}
 # Discord's embed colour (Apprise notification type) for each notification
 NOTIFY_TYPES = {"complete": "success", "object_complete": "success",
+                "calibration": "success",
                 "driver_hot": "warning", "error": "failure",
                 "warning": "failure", "shutdown": "failure",
                 "power_loss": "failure", "filament_short": "failure",
@@ -516,7 +525,9 @@ class PushNotifications:
         self._obj_first_sent: Set[str] = set()
         self._status: Dict[str, Dict[str, Any]] = {
             "print_stats": {}, "virtual_sdcard": {}, "print_task_config": {},
-            "exclude_object": {}, **{d: {} for d in DRIVERS}}
+            "exclude_object": {}, "machine_state_manager": {},
+            **{d: {} for d in DRIVERS}}
+        self._calibrating: Optional[int] = None  # main_state of a running one
 
         self.server.register_event_handler(
             "job_state:state_changed", self._on_job_event)
@@ -1165,6 +1176,30 @@ class PushNotifications:
     # ---- exceptions ----------------------------------------------------
 
     # Event handlers must return quickly; do the waiting in a task.
+    def _track_calibration(self) -> None:
+        """A manual calibration (touchscreen: bed levelling, XYZ offset,
+        flow, input shaper) is reported when its machine state ends in
+        idle. The bed mesh inside a print job's start routine sets the same
+        state, so nothing is reported while a print job is active."""
+        if "calibration" not in self.rows:
+            return
+        state = self._status["machine_state_manager"].get("main_state")
+        try:
+            state = int(state)
+        except (TypeError, ValueError):
+            return
+        if state in CALIBRATIONS:
+            if self._calibrating is None and not self._job_active:
+                self._calibrating = state
+            return
+        done, self._calibrating = self._calibrating, None
+        if done is None or self._job_active or state != MSM_IDLE:
+            return
+        what = CALIBRATIONS[done]
+        self._spawn(self._send(
+            "calibration", self._title("calibration", what=what),
+            "The printer is idle again.", camera_wait=0.))
+
     async def _on_exception(self, excep: Dict[str, Any]) -> None:
         if fault_key(excep) == self._stale_fault:
             self._stale_fault = None    # it happened again
@@ -1246,7 +1281,9 @@ class PushNotifications:
                                          "excluded_objects"],
                       **{d: ["temperature"] for d in DRIVERS}},
                      **({"print_task_config": PTC_FIELDS}
-                        if self._spoolman_active() else {})),
+                        if self._spoolman_active() else {}),
+                     **({"machine_state_manager": ["main_state"]}
+                        if "calibration" in self.rows else {})),
                 self._on_status_update, default={})
         except Exception as e:
             logging.error("[push_notifications] subscribe failed: %s", e)
@@ -1273,6 +1310,8 @@ class PushNotifications:
         ps = self._status["print_stats"]
         if "print_task_config" in data and self._job_active:
             self._check_spool_switch()
+        if "machine_state_manager" in data:
+            self._track_calibration()
         if not self._job_active or ps.get("state") != "printing":
             return
         filename = ps.get("filename") or ""

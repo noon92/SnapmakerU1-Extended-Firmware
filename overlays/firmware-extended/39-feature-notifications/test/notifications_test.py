@@ -613,6 +613,37 @@ async def test_time_left():
           left.startswith("~29m left"), left)
 
 
+async def test_calibration():
+    print("Calibration complete: manual calibrations only")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({}, {"calibration": [("ntfy", ntfy, False)]})
+    STATE["print_stats"] = ps("standby")
+    await server.handlers["server:klippy_ready"]()
+
+    async def msm(state):
+        await c._on_status_update(
+            {"machine_state_manager": {"main_state": state}}, 0)
+    await msm(3)                   # bed levelling from the touchscreen
+    await msm(3)
+    await msm(1)                   # back to idle
+    await asyncio.sleep(0.3)
+    check("a touchscreen calibration ending in idle is reported, by name",
+          [e["title"] for e in log] == ["🛠️ U1 Bed levelling complete"],
+          [e["title"] for e in log])
+    await msm(5)
+    await msm(0)                   # ends somewhere other than idle
+    await asyncio.sleep(0.3)
+    check("one that doesn't end in idle isn't", len(log) == 1)
+    await start_job(server)        # the start routine's bed mesh
+    await msm(3)
+    await msm(1)
+    await asyncio.sleep(0.3)
+    check("the bed mesh inside a print job isn't", len(log) == 1,
+          [e["title"] for e in log])
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -784,7 +815,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_driver_hot,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

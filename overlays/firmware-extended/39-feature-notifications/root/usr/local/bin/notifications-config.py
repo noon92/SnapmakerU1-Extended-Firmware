@@ -102,6 +102,8 @@ ROWS = [
      False),
     ("cancelled", "Print cancelled", "🚫", True, "default", "snapshot",
      "print", False),
+    ("calibration", "Calibration complete", "🛠️", True, "default",
+     "snapshot", "print", False),
     ("error", "Error", "⚠️", True, "max", "snapshot", "fault", True),
     ("warning", "Warning", "⚠️", True, "max", "snapshot", "fault", True),
 

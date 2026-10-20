@@ -110,11 +110,12 @@ TITLES = {
     "complete": "✅ {name} complete",
     "cancelled": "🚫 {name} cancelled",
     "calibration": "📐 {name} {what} complete",
+    "calibration_failed": "📐 {name} {what} failed",
     "intervention": "🖐️ {name} user intervention needed",
     "error": "⚠️ {name} Error: {kind}",
     "warning": "⚠️ {name} Warning",
     "shutdown": "🛑 {name} Error: shutdown",
-    "power_loss": "🔌 {name} power loss",
+    "power_loss": "⚡ {name} power loss",
     "driver_hot": "🌡️ {name} driver running hot",
     "filament_short": "🧵 {name} not enough filament",
     "filament_close": "🧵 {name} filament may be insufficient",
@@ -132,6 +133,7 @@ IMAGE_KINDS = ("render", "snapshot", "spool", "none")
 CALIBRATIONS = {2: "XYZ offset calibration", 3: "Bed levelling",
                 4: "Flow calibration", 5: "Input shaper calibration"}
 MSM_IDLE = 0
+MSM_ABNORMAL = 7
 # action_code values (same file) of the steps that wait for a person:
 # MANUAL_CLEAN_EXTRUDER..3 (brush the nozzle, then tap the screen)
 MANUAL_CLEAN = {192: 1, 193: 2, 194: 3, 195: 4}
@@ -1210,8 +1212,15 @@ class PushNotifications:
             done, self._calibrating = self._calibrating, None
             self._cal_action = None
             self._cal_hold += 1
-            if done is not None and (state == MSM_IDLE
-                                     or state in CALIBRATIONS):
+            if done is not None and state == MSM_ABNORMAL:
+                self._spawn(self._send(
+                    "calibration",
+                    self._title("calibration_failed",
+                                what=CALIBRATIONS[done]),
+                    "The printer reports an abnormal state; check the "
+                    "screen.", camera_wait=0.))
+            elif done is not None and (state == MSM_IDLE
+                                       or state in CALIBRATIONS):
                 self._spawn(self._send(
                     "calibration",
                     self._title("calibration", what=CALIBRATIONS[done]),

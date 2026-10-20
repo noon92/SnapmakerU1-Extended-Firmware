@@ -109,7 +109,7 @@ ROWS = [
 
     ("shutdown", "Klipper shutdown", "🛑", True, "max", "snapshot", "fault",
      True),
-    ("power_loss", "Power loss recovery", "🔌", True, "max", "snapshot", "fault",
+    ("power_loss", "Power loss recovery", "⚡", True, "max", "snapshot", "fault",
      True),
     # X or Y stepper driver at or over the set temperature; once per print
     # job, again after a pause

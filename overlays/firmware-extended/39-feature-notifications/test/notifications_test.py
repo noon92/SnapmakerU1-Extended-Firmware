@@ -666,6 +666,14 @@ async def test_calibration():
     await msm(9)                   # ends somewhere other than idle
     await asyncio.sleep(0.4)
     check("one that doesn't end in idle isn't reported", log == [])
+    await msm(0)
+    await msm(4, 320)
+    await msm(7)                   # ABNORMAL
+    await asyncio.sleep(0.4)
+    check("one that ends abnormal is reported as failed",
+          titles() == ["📐 U1 Flow calibration failed"], titles())
+    log.clear()
+    await msm(0)
     await start_job(server)        # the start routine's bed mesh
     await msm(3, 257)
     await msm(3, 0)

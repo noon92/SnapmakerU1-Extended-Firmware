@@ -1411,7 +1411,7 @@ class PushNotifications:
                     "first_layer", self._title(
                         "first_layer",
                         ordinal=ORDINALS[self.layers_complete]),
-                    shown(filename)))
+                    self._lines(shown(filename), self._time_left())))
         pct = self._progress() * 100.
         crossed = [m for m in MILESTONES
                    if m <= pct and m not in self._milestones_sent]
@@ -1492,7 +1492,8 @@ class PushNotifications:
                 "first_layer",
                 self._title("first_layer",
                             ordinal=ORDINALS[self.layers_complete]),
-                self._lines(shown(filename), self._object_line(cur))))
+                self._lines(shown(filename), self._object_line(cur),
+                            self._time_left())))
 
     def _object_done(self, name: str, filename: str) -> None:
         if "object_complete" not in self.rows:

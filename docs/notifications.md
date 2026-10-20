@@ -19,7 +19,7 @@ server), and/or to a webhook for home automation.
 | ▶️ Print started | Model preview | The slicer thumbnail, and the slicer's estimated print time and ETA |
 | ⏸️ Print paused / ▶️ Print resumed | Camera | Resumed includes time left and ETA |
 | 🎬 First layer started | Camera | Off by default. When the first layer begins, after the start routine (homing, bed mesh, flow calibration can take a while): time to watch it go down. With time left and ETA |
-| 🔍 1st / 2nd / 3rd layer complete | Camera | Choose after which layer (default: 2nd). When printing by object (Orca's *print sequence: by object*), once per object, counted from the object's own first layer, or once per print job |
+| 🔍 1st / 2nd / 3rd layer complete | Camera | Choose after which layer (default: 2nd). With time left and ETA. When printing by object (Orca's *print sequence: by object*), once per object, counted from the object's own first layer, or once per print job |
 | ⏳ 25% / 50% / 75% complete | Camera | Same percentage as Fluidd and the Snapmaker app, with time left and ETA |
 | ✅ Print complete | Camera | Includes print time. When printing by object: once per object as each one finishes and the next begins ("📦 object complete", with which object, e.g. "Object 2 of 3: Assembly", and time left; the last object's is the Print complete notification itself), or once per print job |
 | 🚫 Print cancelled | Camera | |

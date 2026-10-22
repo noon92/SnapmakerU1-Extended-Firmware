@@ -1308,15 +1308,25 @@ def read_stdin_json():
 
 
 def components_module(name):
-    """A helper module that lives with the Moonraker component."""
-    import importlib
-    sys.path.insert(0, COMPONENTS_DIR)
+    """A helper module that lives with the Moonraker component, loaded from
+    its file. The components folder must not go on sys.path: Moonraker's own
+    components there (secrets.py, ...) would shadow standard modules that
+    requests and Apprise import, and fail on their relative imports."""
+    import importlib.util
+    if name in sys.modules:
+        return sys.modules[name]
+    path = os.path.join(COMPONENTS_DIR, name + ".py")
     try:
-        return importlib.import_module(name)
-    except ImportError as e:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no {path}")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    except (ImportError, OSError) as e:
+        sys.modules.pop(name, None)
         raise ConfigError(f"{name} is not installed ({e})")
-    finally:
-        sys.path.pop(0)
 
 
 def discord_module():

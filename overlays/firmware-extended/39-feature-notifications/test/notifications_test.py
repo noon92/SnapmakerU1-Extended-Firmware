@@ -575,12 +575,19 @@ async def test_spool_switch():
     # Runout: the printer pauses, moves T0 to toolhead 2, resumes
     STATE["print_stats"]["state"] = "paused"
     c._status["print_stats"]["state"] = "paused"
+    # SpoolLink clears the emptied toolhead's spool before the refill
+    await c._on_status_update(
+        {"print_task_config": {"filament_spool_id": [0, 20]}}, 0)
     await c._on_status_update(
         {"print_task_config": {"extruder_map_table": [1, 0]}}, 0)
     await asyncio.sleep(0.6)
     check("a refill while paused is reported",
           [e["title"] for e in log] == ["🔄 U1 switched to backup spool"],
           [e["title"] for e in log])
+    check("...naming the emptied spool even after it was unassigned",
+          log and "spool #10" in log[0]["body"] and "#0)" not in log[0]["body"],
+          log and log[0]["body"])
+    STATE["print_task_config"]["filament_spool_id"] = [10, 20]
     STATE["print_task_config"]["filament_vendor"] = ["X", "Y"]
     c._job_map = [0, 0]
     log.clear()

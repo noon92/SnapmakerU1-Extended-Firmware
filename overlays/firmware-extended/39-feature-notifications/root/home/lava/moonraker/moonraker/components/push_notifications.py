@@ -2338,6 +2338,11 @@ class PushNotifications:
         ids = list(ptc.get("filament_spool_id") or [])
         f_sid = ids[frm] if frm < len(ids) else 0
         t_sid = ids[to] if to < len(ids) else 0
+        if not f_sid:
+            # The emptied toolhead's spool is unassigned on runout (SpoolLink
+            # clears it before the refill): name the spool it had at start
+            start = list((self._job_ptc or {}).get("filament_spool_id") or [])
+            f_sid = start[frm] if frm < len(start) else 0
         f_spool, t_spool = await self._spool(f_sid), await self._spool(t_sid)
         f_rem = self._remaining(f_spool) or 0.
         t_rem = self._remaining(t_spool)

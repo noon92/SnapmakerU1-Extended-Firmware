@@ -49,6 +49,10 @@ errors by push and email. By default, faults and power loss are also emailed.
   with the same title and advice the printer's screen shows for that code
   (e.g. `Possible Spaghetti Defect Detected`), and an **Error Index** link to the
   [U1 error code reference](https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/u1_error_codes).
+- **Named pictures**: every picture is sent as a file named with the time,
+  printer, notification and print job, e.g.
+  `2026-10-22_17-05-03_U1-martha_50pct_Benchy.jpg`, so saved or exported
+  images keep their context. Letters, digits, `.`, `_` and `-` only.
 - **Snapshots before parking**: For *Print complete* and *Cancelled*, the
   nozzle lifts straight up 15 mm off the part and the snapshot is taken then,
   while the

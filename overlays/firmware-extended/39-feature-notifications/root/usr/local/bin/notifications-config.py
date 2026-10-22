@@ -1521,8 +1521,13 @@ def fetch_snapshot(s):
     except Exception as e:
         print(f"Camera snapshot unavailable ({e}); sending without an image")
         return None
+    # Named like the notifications' pictures: time, printer, "test"
+    import datetime
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    printer = re.sub(r"[^A-Za-z0-9._-]+", "-", s["name"]).strip("-.")[:32]
     path = os.path.join(tempfile.mkdtemp(prefix="notifications_test_"),
-                        "snapshot.jpg")
+                        "_".join(p for p in (stamp, printer, "test") if p)
+                        + ".jpg")
     with open(path, "wb") as f:
         f.write(data)
     print(f"Attaching camera snapshot ({s['camera']})")

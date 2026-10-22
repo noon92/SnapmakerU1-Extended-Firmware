@@ -711,17 +711,60 @@ class PushNotifications:
             else:
                 path = await self._image(image, filename, snapshot,
                                          snapshot_ready)
+            named = self._named_copy(path, title, filename)
             try:
                 results = await asyncio.gather(*(
-                    self._deliver(rid, d, t, [(title, body, path)])
+                    self._deliver(rid, d, t, [(title, body, named)])
                     for d, t in zip(dests, tickets)), return_exceptions=True)
             finally:
+                if named is not None and named != path:
+                    shutil.rmtree(os.path.dirname(named), ignore_errors=True)
                 if path is not None and image == "snapshot":
                     shutil.rmtree(os.path.dirname(path), ignore_errors=True)
         finally:
             for t in tickets:
                 await t.gate.done(t.ticket)
         return all(results)
+
+    def _image_name(self, title: str, filename: str, ext: str) -> str:
+        """File name for a notification's picture, so saved or exported
+        images say what they were: time, printer, notification, file, e.g.
+        2026-10-22_17-05-03_U1-martha_50pct_Benchy.jpg. Letters, digits,
+        . _ - only (it is also the email's inline image reference)."""
+        now = datetime.datetime.now(self.tz) if self.tz else \
+            datetime.datetime.now()
+        # The notification as its title says it, without the emoji and the
+        # printer's name ("⏳ U1-martha 50%" -> "50%")
+        event = title.split(" ", 1)[1] if " " in title else title
+        if event.startswith(self.name + " "):
+            event = event[len(self.name) + 1:]
+        event = event.replace("%", "pct")
+
+        def clean(text: str, cap: int) -> str:
+            text = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")
+            return text[:cap].rstrip("-.")
+        parts = [now.strftime("%Y-%m-%d_%H-%M-%S"), clean(self.name, 32),
+                 clean(event, 48), clean(shown(filename), 64)]
+        return "_".join(p for p in parts if p) + ext
+
+    def _named_copy(
+        self, path: Optional[str], title: str, filename: str = ""
+    ) -> Optional[str]:
+        """A copy of the picture under its descriptive name, in its own
+        temporary folder (the original may be a Moonraker thumbnail, or
+        shared with another notification). The original on failure."""
+        if path is None:
+            return None
+        try:
+            name = self._image_name(title, filename or self._job_filename,
+                                    os.path.splitext(path)[1] or ".jpg")
+            tmpdir = tempfile.mkdtemp(prefix="push_notifications_")
+            dest = os.path.join(tmpdir, name)
+            shutil.copyfile(path, dest)
+            return dest
+        except Exception as e:
+            logging.warning("[push_notifications] image name: %s", e)
+            return path
 
     def _reserve(self, channel: str, rid: str) -> Ticket:
         """Place in a channel's send order, taken when the notification
@@ -2340,8 +2383,12 @@ class PushNotifications:
                     path = None
                     if kind == "spool":
                         if key not in paths:
-                            paths[key] = await self.eventloop.run_in_thread(
+                            drawn = await self.eventloop.run_in_thread(
                                 self._render_rows, rows)
+                            paths[key] = self._named_copy(drawn, t)
+                            if drawn and paths[key] != drawn:
+                                shutil.rmtree(os.path.dirname(drawn),
+                                              ignore_errors=True)
                         path = paths[key]
                     out.append((t, b, path))
                 per_dest.append(out)

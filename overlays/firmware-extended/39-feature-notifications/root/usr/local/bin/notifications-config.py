@@ -1660,7 +1660,9 @@ def cmd_test():
         elif s["provider"] == "gotify":
             text = body + "\n\n" + " · ".join(
                 f"[{t}]({u})" for t, u in links(s, "test", cam))
-        dests.append((target, row_url(s, "test", "default", cam),
+        # Max priority: the test must come through however the phone's
+        # notification settings treat lower priorities
+        dests.append((target, row_url(s, "test", "max", cam),
                       text.strip()))
     if email_configured(s):
         dests.append((f"email ({s['email_to']}) via {s['email_host']}",

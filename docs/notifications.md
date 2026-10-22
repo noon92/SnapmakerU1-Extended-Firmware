@@ -325,7 +325,7 @@ notification as their subject.
 5. Choose which notifications you want (**Push** and/or **Email**), with
    priority and image.
 6. Click **Send Test** to check the connection. It sends a test to each
-   service you set up. On failure, the log shows the service's response
+   service you set up, at **Max** priority. On failure, the log shows the service's response
    (e.g. `forbidden, error=40301` for an ntfy token without write access to
    the topic, or `535` for a wrong email password).
 7. Click **Save & Apply**.

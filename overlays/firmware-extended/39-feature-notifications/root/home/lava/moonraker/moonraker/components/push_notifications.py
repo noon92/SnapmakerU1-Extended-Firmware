@@ -2220,7 +2220,10 @@ class PushNotifications:
         """A filament runout on a toolhead with a backup spool the printer
         will refill from by itself."""
         try:
-            runout = int(ex.get("id", -1)) == RUNOUT_EXCEPTION_ID or \
+            # 523 is the whole toolhead module (tangles, pickup and park
+            # failures too); code 0 with "runout" is the runout itself
+            runout = int(ex.get("id", -1)) == RUNOUT_EXCEPTION_ID and \
+                int(ex.get("code", -1)) == 0 and \
                 "runout" in str(ex.get("message", "")).lower()
             ch = int(ex.get("index", -1))
         except (TypeError, ValueError):

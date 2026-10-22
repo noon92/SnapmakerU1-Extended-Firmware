@@ -638,6 +638,10 @@ async def test_spool_switch():
             check("runout with no refill: the error after the wait",
                   titles == ["Error: paused"], titles)
     pn.REFILL_WAIT = 25.
+    tangle = {"id": 523, "index": 0, "code": 38,
+              "message": "detect filament tangled!", "level": 2}
+    check("a tangle (same module id) is not held as a runout",
+          not c._refill_expected(tangle))
 
 
 async def test_time_left():

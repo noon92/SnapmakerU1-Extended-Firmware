@@ -12,6 +12,14 @@ server), and/or to a webhook for home automation.
 
 ![Notifications settings](screenshots/notifications.png)
 
+**Contents:** [What it provides](#what-it-provides) ·
+[Choosing a service](#choosing-a-service) ([Gotify](#gotify),
+[Telegram](#telegram), [Webhook](#webhook), [Discord](#discord),
+[Email](#email)) · [Requirements](#requirements) · [Setup](#setup) ·
+[Self-hosting a push server](#self-hosting-a-push-server)
+([ntfy](#ntfy-server), [Gotify](#gotify-server)) · [Security](#security) ·
+[Configuration file](#configuration-file) · [Troubleshooting](#troubleshooting)
+
 ## What It Provides
 
 | Notification | Image | Notes |
@@ -262,8 +270,9 @@ notification as their subject.
 ## Requirements
 
 - For images on a **self-hosted ntfy** server, attachments must be enabled
-  (`attachment-cache-dir` in the server's `server.yml`). Otherwise
-  notifications arrive without images.
+  (`base-url` and `attachment-cache-dir` in the server's `server.yml`, see
+  [ntfy server](#ntfy-server)). Otherwise notifications arrive without
+  images.
 - For camera images, the **paxx12** camera service for the selected camera
   (the default for the internal camera, see [Camera Support](camera_support.md)).
 - For *Layer complete*, the slicer must emit `SET_PRINT_STATS_INFO`
@@ -323,6 +332,107 @@ configuration changed, and only when the printer is idle. While a print is
 running (or if the printer state can't be checked), settings are saved but
 services are not restarted. They apply after you restart Moonraker and
 Klipper (**Actions**) or reboot.
+
+## Self-hosting a push server
+
+A server of your own keeps notifications (camera pictures and file names
+included) private. It runs anywhere Docker runs: a home server, a NAS, a
+Raspberry Pi. The printer only needs to reach it, and your phone needs to
+reach it from wherever you want notifications: on your home network, over
+[Tailscale](vpn.md), or from the internet behind HTTPS.
+
+### ntfy server
+
+1. **Create a folder** for it (e.g. `ntfy/`) with this `docker-compose.yml`:
+
+   ```yaml
+   services:
+     ntfy:
+       image: binwiederhier/ntfy
+       container_name: ntfy
+       command: serve
+       environment:
+         - TZ=Etc/UTC
+       volumes:
+         - ./cache:/var/cache/ntfy
+         - ./etc:/etc/ntfy
+       ports:
+         - 8080:80
+       restart: unless-stopped
+   ```
+
+2. **Configure it** in `etc/server.yml`:
+
+   ```yaml
+   base-url: "http://192.168.1.10:8080"   # the address your phone uses
+   cache-file: "/var/cache/ntfy/cache.db"
+   auth-file: "/var/cache/ntfy/user.db"
+   auth-default-access: "deny-all"        # nobody reads or writes without a login
+   attachment-cache-dir: "/var/cache/ntfy/attachments"
+   # upstream-base-url: "https://ntfy.sh" # only for the iPhone app (below)
+   ```
+
+   `base-url` and `attachment-cache-dir` are both needed for the pictures:
+   without them ntfy rejects attachments and notifications arrive without
+   images. Behind a reverse proxy, set `base-url` to the public HTTPS address
+   and add `behind-proxy: true`.
+
+3. **Start it**: `docker compose up -d`.
+
+4. **Create a user and a token for the printer**:
+
+   ```
+   docker exec -it ntfy ntfy user add --role=admin you
+   docker exec -it ntfy ntfy token add you
+   ```
+
+   The second command prints a token (`tk_...`). An admin can read and write
+   every topic. For a printer account that can only post to its topic, use
+   `ntfy user add printer`, `ntfy access printer u1 write-only` and
+   `ntfy token add printer` instead (each after `docker exec -it ntfy`).
+
+5. **In Firmware Config**: Push service **ntfy**, Server URL
+   `http://192.168.1.10:8080`, Topic `u1`, Authentication **Access token**,
+   and paste the token. **Send Test**.
+
+6. **On your phone**: install the ntfy app, add your server (Settings >
+   Manage users, with your login), and subscribe to the topic. On Android, turn
+   on *instant delivery* for the subscription so notifications don't wait for
+   the phone's background sync.
+
+   The iPhone app only wakes up for notifications relayed through ntfy.sh's
+   push service: uncomment `upstream-base-url` in `server.yml` (only a hash of
+   the topic goes to ntfy.sh, not the message).
+
+**Reaching it from outside your home**: either over [Tailscale](vpn.md) (use
+the server's Tailscale address in Firmware Config and in the app), or behind a
+reverse proxy with HTTPS (Caddy, nginx, Cloudflare Tunnel). Behind Cloudflare,
+keep its *Browser Integrity Check* in mind: it blocks requests from clients it
+doesn't recognise as browsers (error 1010), which can catch scripts and
+`curl` tests; the printer's own sends are not affected.
+
+### Gotify server
+
+```yaml
+services:
+  gotify:
+    image: gotify/server
+    container_name: gotify
+    environment:
+      - GOTIFY_DEFAULTUSER_PASS=change-me
+    volumes:
+      - ./data:/app/data
+    ports:
+      - 8081:80
+    restart: unless-stopped
+```
+
+Start it with `docker compose up -d`, sign in to `http://<server>:8081` as
+`admin` with that password (and change it), then **Apps > Create
+Application** and copy the app token. In Firmware Config: Push service
+**Gotify**, the Server URL and the token. Install the Gotify app on Android
+and log in to the same server; Gotify has no official iPhone app. Gotify
+notifications are text only (see [Gotify](#gotify)).
 
 ## Security
 

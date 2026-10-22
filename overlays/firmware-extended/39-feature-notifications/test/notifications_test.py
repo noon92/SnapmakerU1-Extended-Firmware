@@ -775,6 +775,19 @@ async def test_image_names():
           log and not os.path.exists(log[0]["attach"]))
 
 
+async def test_fault_emoji():
+    print("Fault emoji before the error code")
+    cases = [((532, 0, 2), "🍝 "), ((523, 1, 2), "🌡️ "), ((523, 3, 42), "🔧 "),
+             ((525, 2, 32), "🧵 "), ((530, 0, 4), "📐 "), ((531, 0, 9), "💾 "),
+             ((531, 0, 7), "☁️ "), ((523, 0, 6), ""), ((523, 0, 38), ""),
+             ((532, 0, 1), "")]
+    got = [(pn.describe(dict(level=2, id=m, index=i, code=c, message="x"))
+            .split("\n")[0]) for (m, i, c), _ in cases]
+    check("emoji by code, none for the rest",
+          all(g.startswith(e + "000") if e else g.startswith("000")
+              for g, (_, e) in zip(got, cases)), got)
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -946,7 +959,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_driver_hot,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

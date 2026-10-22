@@ -297,6 +297,48 @@ def exception_text() -> Dict[str, str]:
     return _exception_text
 
 
+# An emoji before the error code for some kinds of fault, by module id and
+# code (any toolhead), going by each code's text in exception_en-GB.json.
+# Codes not listed get none.
+def _codes(module: int, *codes: Any) -> Set[Tuple[int, int]]:
+    out: Set[Tuple[int, int]] = set()
+    for c in codes:
+        for n in (c if isinstance(c, range) else (c,)):
+            out.add((module, n))
+    return out
+
+
+FAULT_EMOJI: Dict[Tuple[int, int], str] = {}
+for _emoji, _set in (
+    # Temperature: heating module, nozzle, heated bed, chamber
+    ("🌡️", _codes(522, 15) | _codes(523, 1, 2, 3, 36) | _codes(526, 0, 1)
+     | _codes(527, 0) | _codes(533, 1)),
+    ("💾", _codes(531, 9)),                                # storage space
+    ("☁️", _codes(531, 7, 11, 12)),                        # cloud print file
+    # Calibration (vibration compensation, flow, XYZ offset, homing)
+    ("📐", _codes(522, 21) | _codes(523, 9000, 9001)
+     | _codes(530, range(0, 10), 18, 19, 20, 23, range(24, 29))),
+    ("🍝", _codes(532, 2)),                                # spaghetti
+    # Spool and filament: runout, filament info, feeder loading/unloading
+    ("🧵", _codes(523, 0, 39) | _codes(525, 0, 1, 2, 3, 5, 6, 8,
+                                         range(10, 16), range(30, 36), 70,
+                                         90)),
+    # Toolhead: swapping, picking, parking, detached, placement, Pogopin,
+    # maintenance
+    ("🔧", _codes(523, range(7, 36), range(37, 38), range(40, 48))
+     | _codes(528, 13, 14) | _codes(530, range(13, 17))),
+):
+    for _k in _set:
+        FAULT_EMOJI[_k] = _emoji
+
+
+def fault_emoji(ex: Dict[str, Any]) -> str:
+    try:
+        return FAULT_EMOJI.get((int(ex.get("id")), int(ex.get("code"))), "")
+    except (TypeError, ValueError):
+        return ""
+
+
 def describe(ex: Dict[str, Any]) -> str:
     """Error code and the text the printer shows for it, e.g.
     "0002-0532-0000-0002: Possible Spaghetti Defect Detected" and the
@@ -309,9 +351,11 @@ def describe(ex: Dict[str, Any]) -> str:
         key = ""
     text = exception_text().get(key, "")
     title, _, details = text.partition("_")
+    emoji = fault_emoji(ex)
+    code = f"{emoji} {format_code(ex)}" if emoji else format_code(ex)
     if not title.strip():
-        return f"{format_code(ex)}: {msg}"
-    return "\n".join(x for x in (f"{format_code(ex)}: {title.strip()}",
+        return f"{code}: {msg}"
+    return "\n".join(x for x in (f"{code}: {title.strip()}",
                                  details.strip()) if x)
 
 

@@ -55,7 +55,10 @@ errors by push and email. By default, faults and power loss are also emailed.
   Snapmaker error code in the same format the printer uses
   (`level-module-index-code`, e.g. `0002-0532-0000-0001: detected dirty bed`)
   with the same title and advice the printer's screen shows for that code
-  (e.g. `Possible Spaghetti Defect Detected`), and an **Error Index** link to the
+  (e.g. `Possible Spaghetti Defect Detected`). Some kinds of fault get an
+  emoji before the code: 🌡️ temperature, 💾 storage space, ☁️ cloud, 📐
+  calibration, 🍝 spaghetti, 🧵 spool and filament, 🔧 toolhead. Also an
+  **Error Index** link to the
   [U1 error code reference](https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/u1_error_codes).
 - **Named pictures**: every picture is sent as a file named with the time,
   printer, notification and print job, e.g.

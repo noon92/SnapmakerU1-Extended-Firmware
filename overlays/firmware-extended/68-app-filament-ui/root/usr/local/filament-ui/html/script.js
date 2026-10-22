@@ -31,6 +31,10 @@ const SPOOL_REFRESH_ACTIVE_MS = 3000;
 const SPOOL_REFRESH_IDLE_MS = 30000;
 let spoolPickerSpools = [];
 let spoolPickerCurrentId = null;
+let spoolPickerSuggestedIds = new Set();
+let spoolAssignmentBusy = false;
+let createSpoolContext = null;
+let confirmResolve = null;
 
 // Last known full status — merged incrementally from notify_status_update
 let cachedStatus = {
@@ -213,16 +217,22 @@ async function loadInitialData() {
     }
 }
 
-async function fetchSpoolmanAllSpools() {
-    try {
-        const result = await sendRPC('server.spoolman.proxy', { request_method: 'GET', path: '/v1/spool' });
-        return Array.isArray(result) ? result : [];
-    } catch { return []; }
+async function spoolmanRequest(requestMethod, path, options = {}) {
+    const params = { request_method: requestMethod, path };
+    if (options.query) params.query = options.query;
+    if (options.body !== undefined) params.body = options.body;
+    return await sendRPC('server.spoolman.proxy', params);
+}
+
+async function fetchSpoolmanList(path) {
+    const result = await spoolmanRequest('GET', path, { query: 'limit=1000' });
+    if (!Array.isArray(result)) throw new Error(`Spoolman returned an invalid list for ${path}`);
+    return result;
 }
 
 async function fetchSpoolmanSpool(id) {
     try {
-        return await sendRPC('server.spoolman.proxy', { request_method: 'GET', path: `/v1/spool/${id}` });
+        return await spoolmanRequest('GET', `/v1/spool/${id}`);
     } catch { return null; }
 }
 
@@ -347,9 +357,11 @@ function parseChannelInfo(i, fd, fdState, ptc) {
     // unless the tag actually carries filament data (a material type or vendor).
     const rfidVendor  = fd.VENDOR && fd.VENDOR !== 'NONE' ? fd.VENDOR : null;
     const rfidHasData = !!(fdMainType || rfidVendor);
+    const rawRfidSubtype = fd.SUB_TYPE && fd.SUB_TYPE !== 'NONE' ? fd.SUB_TYPE : null;
     const rfidData = hasUid ? {
         type:     fdMainType,
-        sub_type: fd.SUB_TYPE && fd.SUB_TYPE !== 'NONE' && fd.SUB_TYPE !== 'Basic' ? fd.SUB_TYPE : null,
+        sub_type: rawRfidSubtype && rawRfidSubtype !== 'Basic' ? rawRfidSubtype : null,
+        variant:  rawRfidSubtype,
         vendor:   rfidVendor,
         color:    rfidHasData && fd.RGB_1 != null ? (fd.RGB_1 & 0xFFFFFF).toString(16).padStart(6, '0').toUpperCase() : null,
         min_temp: rfidHasData ? (fd.HOTEND_MIN_TEMP || null) : null,
@@ -357,6 +369,7 @@ function parseChannelInfo(i, fd, fdState, ptc) {
         bed_temp: rfidHasData ? (fd.BED_TEMP        || null) : null,
         diameter: rfidHasData && fd.DIAMETER ? fd.DIAMETER / 100.0 : null,
         density:  rfidHasData ? (fd.DENSITY         || null) : null,
+        weight:   rfidHasData ? (fd.WEIGHT          || null) : null,
     } : null;
 
     const cmpStr = (a, b) => !!(a && b && a.toLowerCase() !== b.toLowerCase());
@@ -495,6 +508,10 @@ function createChannelCard(channel) {
                 }
                 if (spool.remaining_weight != null) rows.push({ label: 'Remaining', value: `${Math.round(spool.remaining_weight)} g` });
                 if (spool.filament.weight  != null) rows.push({ label: 'Total',     value: `${spool.filament.weight} g` });
+                const storedUids = parseCardUids(spool);
+                rows.push({ label: 'RFID tags', html: storedUids.length
+                    ? storedUids.map(uidHtml).join(', ')
+                    : 'none stored' });
                 showPopover(b, rows);
             });
             b.addEventListener('mouseleave', hidePopover);
@@ -640,7 +657,9 @@ function createChannelCard(channel) {
     actions.appendChild(mkBtn('↻ Refresh', '', () => refreshSingleChannel(channel.channel)));
     actions.appendChild(mkBtn('✎ User', '', () => openOverwriteModal(channel.channel)));
     actions.appendChild(mkBtn('Reset', '', () => resetChannel(channel.channel)));
-    if (spoolmanActive) actions.appendChild(mkBtn('⊕ Spool', '', () => openSpoolPicker(channel.channel)));
+    if (spoolmanActive) {
+        actions.appendChild(mkBtn('⊕ Spoolman', '', () => openSpoolPicker(channel.channel)));
+    }
 
     card.appendChild(actions);
     return card;
@@ -678,6 +697,222 @@ function hidePopover() {
     document.getElementById('info-popover').style.display = 'none';
 }
 
+// ── Spoolman helpers ──────────────────────────────────────────────────────
+
+// UID and colour normalisation, the SpoolLink `card_uids` wire format,
+// filament matching, and the Spoolman payload builders.
+
+function cleanText(value) {
+    return value == null ? '' : String(value).trim();
+}
+
+function normalizeText(value) {
+    return cleanText(value).toLowerCase();
+}
+
+function finiteNumber(value) {
+    if (value === '' || value == null) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeUid(value) {
+    if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+        const bytes = Array.from(value);
+        if (bytes.length === 0 || bytes.every(byte => Number(byte) === 0)) return '';
+        if (bytes.some(byte => !Number.isInteger(Number(byte)) || Number(byte) < 0 || Number(byte) > 255)) return '';
+        return bytes.map(byte => Number(byte).toString(16).padStart(2, '0')).join('').toUpperCase();
+    }
+
+    let uid = cleanText(value).replace(/^0x/i, '').replace(/[\s:,.-]/g, '');
+    if (!uid || uid.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(uid) || /^0+$/.test(uid)) return '';
+    return uid.toUpperCase();
+}
+
+function decodeExtraString(value) {
+    let decoded = cleanText(value);
+    if (decoded.length >= 2 && decoded.startsWith('"') && decoded.endsWith('"')) {
+        try {
+            const parsed = JSON.parse(decoded);
+            if (typeof parsed === 'string') decoded = parsed;
+        } catch {
+            decoded = decoded.slice(1, -1);
+        }
+    }
+    return decoded;
+}
+
+function encodeExtraString(value) {
+    return JSON.stringify(cleanText(value));
+}
+
+function parseCardUids(spool) {
+    const seen = new Set();
+    const uids = [];
+    for (const value of decodeExtraString(spool?.extra?.card_uids || '').split(',')) {
+        const uid = normalizeUid(value);
+        if (uid && !seen.has(uid)) {
+            seen.add(uid);
+            uids.push(uid);
+        }
+    }
+    return uids;
+}
+
+function normalizeColor(value) {
+    const color = cleanText(value).replace(/^#/, '').toUpperCase();
+    return /^[0-9A-F]{6}$/.test(color) ? color : '';
+}
+
+function materialDensity(material, reportedDensity) {
+    const reported = finiteNumber(reportedDensity);
+    if (reported != null && reported >= 0.5 && reported <= 3.0) return reported;
+    const wanted = cleanText(material).toUpperCase();
+    return MATERIALS.find(([name]) => name === wanted)?.[1] || 1.24;
+}
+
+// A rough colour word for the seeded filament name. It only has to read better
+// than a hex code: the field stays editable, and filament matching compares the
+// RGB value rather than the name.
+function colorName(value) {
+    const color = normalizeColor(value);
+    if (!color) return '';
+    const [red, green, blue] = [0, 2, 4].map(at => parseInt(color.slice(at, at + 2), 16));
+    const max = Math.max(red, green, blue);
+    const min = Math.min(red, green, blue);
+    if (max - min < 32) return max > 200 ? 'White' : (max < 64 ? 'Black' : 'Gray');
+
+    const degrees = 60 * (max === red
+        ? (((green - blue) / (max - min)) + 6) % 6
+        : max === green
+            ? ((blue - red) / (max - min)) + 2
+            : ((red - green) / (max - min)) + 4);
+    if (degrees >= 10 && degrees < 40 && max < 160) return 'Brown';
+    if (degrees < 15)  return 'Red';
+    if (degrees < 40)  return 'Orange';
+    if (degrees < 70)  return 'Yellow';
+    if (degrees < 165) return 'Green';
+    if (degrees < 195) return 'Cyan';
+    if (degrees < 255) return 'Blue';
+    if (degrees < 290) return 'Purple';
+    if (degrees < 330) return 'Magenta';
+    return 'Red';
+}
+
+function defaultFilamentName(material, variant, color) {
+    const parts = [cleanText(material), cleanText(variant), colorName(color)].filter(Boolean);
+    const deduped = parts.filter((part, at) => at === 0 || normalizeText(part) !== normalizeText(parts[at - 1]));
+    return deduped.join(' ') || 'Custom Filament';
+}
+
+function canCreateSpool(channel) {
+    // A channel that already has a spool needs the Assign tab to change it,
+    // not a second spool for the same filament. Only the UID is required:
+    // SpoolLink resolves by UID, so a blank tag works as well as a coded one.
+    return !!(channel?.spool_id == null && normalizeUid(channel?.uid));
+}
+
+// Whether the tag carries enough filament data to seed the whole form.
+function hasTagFilament(metadata) {
+    return !!(cleanText(metadata?.vendor) && cleanText(metadata?.type) && normalizeColor(metadata?.color));
+}
+
+// Exact vendor/material/variant/colour identity, with blank and `Basic`
+// variants treated as equivalent. Returns null when the metadata is too
+// incomplete to identify anything, so callers can skip matching entirely.
+function metadataKey(metadata) {
+    const vendor = normalizeText(metadata?.vendor);
+    const material = normalizeText(metadata?.material || metadata?.type);
+    const color = normalizeColor(metadata?.color);
+    if (!vendor || !material || !color) return null;
+    // A blank variant and `Basic` mean the same thing.
+    const variant = normalizeText(metadata?.variant || metadata?.sub_type);
+    return `${vendor}|${material}|${variant === 'basic' ? '' : variant}|${color}`;
+}
+
+function filamentKey(filament) {
+    return metadataKey({
+        vendor: filament?.vendor?.name,
+        material: filament?.material,
+        variant: decodeExtraString(filament?.extra?.variant || ''),
+        color: filament?.color_hex,
+    });
+}
+
+function findMatchingFilaments(filaments, metadata) {
+    const key = metadataKey(metadata);
+    if (!key) return [];
+    return (filaments || []).filter(filament => filamentKey(filament) === key);
+}
+
+// Spools whose filament is the same vendor/material/variant/colour as the
+// tag, so the picker can suggest them instead of a duplicate spool.
+function findMatchingSpools(spools, metadata) {
+    const key = metadataKey(metadata);
+    if (!key) return [];
+    return (spools || []).filter(spool => filamentKey(spool?.filament) === key);
+}
+
+function buildFilamentPayload(values, vendorId) {
+    const diameter = finiteNumber(values?.diameter);
+    const density = finiteNumber(values?.density);
+    const color = normalizeColor(values?.color);
+    const name = cleanText(values?.name);
+    const material = cleanText(values?.material);
+    if (!name) throw new Error('Filament name is required');
+    if (!material) throw new Error('Material is required');
+    if (!color) throw new Error('A valid six-digit colour is required');
+    if (diameter == null || diameter <= 0) throw new Error('Diameter must be greater than zero');
+    if (density == null || density <= 0) throw new Error('Density must be greater than zero');
+
+    const payload = {
+        name,
+        material,
+        color_hex: color,
+        diameter,
+        density,
+    };
+    if (Number.isInteger(Number(vendorId)) && Number(vendorId) > 0) payload.vendor_id = Number(vendorId);
+
+    const weight = finiteNumber(values?.net_weight);
+    const tare = finiteNumber(values?.tare_weight);
+    const nozzle = finiteNumber(values?.nozzle_temp);
+    const bed = finiteNumber(values?.bed_temp);
+    if (weight != null && weight > 0) payload.weight = weight;
+    if (tare != null && tare >= 0) payload.spool_weight = tare;
+    if (nozzle != null && nozzle > 0) payload.settings_extruder_temp = Math.round(nozzle);
+    if (bed != null && bed > 0) payload.settings_bed_temp = Math.round(bed);
+
+    const variant = cleanText(values?.variant);
+    if (variant) payload.extra = { variant: encodeExtraString(variant) };
+    return payload;
+}
+
+function buildSpoolPayload(filamentId, values) {
+    const id = Number(filamentId);
+    const uid = normalizeUid(values?.uid);
+    const netWeight = finiteNumber(values?.net_weight);
+    const tareWeight = finiteNumber(values?.tare_weight);
+    if (!Number.isInteger(id) || id <= 0) throw new Error('A valid filament is required');
+    if (!uid) throw new Error('A valid RFID UID is required');
+    if (netWeight == null || netWeight <= 0) throw new Error('Net weight must be greater than zero');
+
+    const payload = {
+        filament_id: id,
+        initial_weight: netWeight,
+        remaining_weight: netWeight,
+        extra: { card_uids: encodeExtraString(uid) },
+    };
+    if (tareWeight != null && tareWeight >= 0) payload.spool_weight = tareWeight;
+    return payload;
+}
+
+function findUidOwners(spools, uidValue) {
+    const uid = normalizeUid(uidValue);
+    if (!uid) return [];
+    return (spools || []).filter(spool => parseCardUids(spool).includes(uid));
+}
+
 // ── Spoolman picker ───────────────────────────────────────────────────────
 
 function escHtml(str) {
@@ -710,26 +945,171 @@ function copyToClipboard(text) {
     });
 }
 
+function currentChannelUid(channel) {
+    const current = channelsData.find(item => item.channel === channel);
+    return normalizeUid(current?.uid);
+}
+
+function formatUid(uid) {
+    const normalized = normalizeUid(uid);
+    return normalized ? normalized.match(/.{2}/g).join(':') : 'none';
+}
+
+function uidHtml(uid) {
+    return `<span class="uid-value">${escHtml(formatUid(uid))}</span>`;
+}
+
+function describeSpool(spool) {
+    const name = spool?.filament?.name || spool?.filament?.material || 'Unknown filament';
+    return `Spool #${spool?.id} (${name})`;
+}
+
+function ensureChannelUid(channel, expectedUid) {
+    const actualUid = currentChannelUid(channel);
+    if (actualUid !== normalizeUid(expectedUid)) {
+        throw new Error(`The RFID in Extruder ${channel + 1} changed. Read the spool tag again before continuing.`);
+    }
+}
+
+function resolveConfirmation(accepted) {
+    closeModal('confirm-modal');
+    if (!confirmResolve) return;
+    const resolve = confirmResolve;
+    confirmResolve = null;
+    resolve(accepted);
+}
+
+function requestConfirmation(title, rows) {
+    if (confirmResolve) resolveConfirmation(false);
+    document.getElementById('confirm-title').textContent = title;
+    document.getElementById('confirm-content').innerHTML = rows.map(row =>
+        `<div class="confirm-row">` +
+        `<span class="confirm-label">${escHtml(row.label)}</span>` +
+        `<span class="confirm-value">${row.html !== undefined ? row.html : escHtml(row.value)}</span>` +
+        `</div>`
+    ).join('');
+    openModal('confirm-modal');
+    return new Promise(resolve => { confirmResolve = resolve; });
+}
+
+async function executeSpoolAssignment(channel, targetSpool, uid) {
+    ensureChannelUid(channel, uid);
+    await sendGcode(`SET_SPOOL_ID LANE=E${channel} SPOOL_ID=${targetSpool.id}`);
+    if (!uid) {
+        // The gcode already succeeded, so a failed refresh must not be reported
+        // as a failed assignment; the periodic refresh catches up.
+        const spool = await fetchSpoolmanSpool(targetSpool.id);
+        if (spool) spoolmanSpools.set(Number(spool.id), spool);
+        rebuildFromCache();
+        return;
+    }
+
+    // SET_SPOOL_ID returns before the UID has moved: Moonraker dispatches the
+    // remote method asynchronously and SpoolLink then does its own retried
+    // GET/GET/PATCH, so poll until the target spool owns the UID on its own.
+    for (const wait of [500, 750, 1000, 1500, 2000, 2000]) {
+        await new Promise(resolve => setTimeout(resolve, wait));
+        const spools = await fetchSpoolmanList('/v1/spool').catch(() => null);
+        const owners = spools ? findUidOwners(spools, uid) : [];
+        if (owners.length === 1 && Number(owners[0].id) === Number(targetSpool.id)) {
+            spoolmanSpools.set(Number(targetSpool.id), owners[0]);
+            rebuildFromCache();
+            return;
+        }
+    }
+    rebuildFromCache();
+    throw new Error(`RFID ${formatUid(uid)} assignment could not be verified`);
+}
+
+const SPOOL_TAB_INTRO = {
+    assign: 'Assigns an existing Spoolman spool to this extruder so its remaining weight is ' +
+        'tracked while printing. A tag in the extruder is linked to that spool, and resolves ' +
+        'to it automatically next time.',
+    create: 'Creates a new Spoolman spool for the tag in this extruder and assigns it. The ' +
+        'fields are seeded from the tag when it carries filament data; a filament with the ' +
+        'same brand, material, subtype and colour is reused rather than duplicated.',
+};
+
+function showSpoolTab(tab) {
+    const create = tab === 'create';
+    document.getElementById('spoolman-intro').textContent = SPOOL_TAB_INTRO[tab];
+    document.getElementById('spool-tab-assign').classList.toggle('active', !create);
+    document.getElementById('spool-tab-create').classList.toggle('active', create);
+    document.getElementById('spool-panel-assign').style.display = create ? 'none' : '';
+    document.getElementById('spool-panel-create').style.display = create ? '' : 'none';
+    document.getElementById('spool-actions-assign').style.display = create ? 'none' : '';
+    document.getElementById('spool-actions-create').style.display = create ? '' : 'none';
+}
+
 async function openSpoolPicker(channel) {
     spoolPickerChannel = channel;
-    document.getElementById('spoolman-modal-title').textContent = `Pick Spool — Extruder ${channel + 1}`;
+    const ch = channelsData.find(item => item.channel === channel);
+    document.getElementById('spoolman-modal-title').textContent = `Spoolman — Extruder ${channel + 1}`;
     document.getElementById('spoolman-search').value = '';
+    prepareCreateSpoolForm(channel);
+    document.getElementById('spool-tab-create').disabled = !canCreateSpool(ch);
+    showSpoolTab('assign');
     const list = document.getElementById('spoolman-list');
     list.innerHTML = '<div class="spoolman-loading"><span class="spinner"></span> Loading…</div>';
+    // The search box re-renders from this state, so clear the previous channel's.
+    spoolPickerSpools = [];
+    spoolPickerCurrentId = null;
+    spoolPickerSuggestedIds = new Set();
     openModal('spoolman-modal');
 
-    const spools = await fetchSpoolmanAllSpools();
-    spoolPickerSpools = spools;
-    const ch = channelsData.find(c => c.channel === channel);
-    spoolPickerCurrentId = ch ? ch.spool_id : null;
-    renderSpoolList('');
+    try {
+        const spools = await fetchSpoolmanList('/v1/spool');
+        spoolPickerSpools = spools;
+        spoolPickerCurrentId = ch ? ch.spool_id : null;
+        spoolPickerSuggestedIds = new Set(
+            findMatchingSpools(spools, ch?.rfid_data).map(spool => Number(spool.id)));
+        renderSpoolList('');
+    } catch (err) {
+        list.innerHTML = `<div class="spoolman-empty">${escHtml(`Failed to load Spoolman: ${err.message}`)}</div>`;
+    }
+}
+
+function spoolPickerItem(spool) {
+    const item = document.createElement('div');
+    const suggested = spoolPickerSuggestedIds.has(Number(spool.id));
+    item.className = 'spoolman-item'
+        + (spool.id === spoolPickerCurrentId ? ' active' : '')
+        + (suggested ? ' suggested' : '');
+    const name     = spool.filament.name || spool.filament.material || 'Unknown';
+    const vendor   = spool.filament.vendor?.name || '';
+    const material = spool.filament.material || '';
+    const meta     = [vendor, material].filter(Boolean).join(' · ');
+    const weight   = spool.remaining_weight != null ? `${Math.round(spool.remaining_weight)} g` : '—';
+    const multiHexes = spool.filament.multi_color_hexes
+        ? spool.filament.multi_color_hexes.split(',').map(c => c.trim()).filter(Boolean)
+        : null;
+    const swatchColors = (multiHexes && multiHexes.length > 0) ? multiHexes : [spool.filament.color_hex || 'CCCCCC'];
+    const swatchesHtml = swatchColors
+        .map(c => `<div class="spoolman-swatch" style="background:#${escHtml(c)}"></div>`)
+        .join('');
+    const uids = parseCardUids(spool);
+    const uidsLabel = uids.length ? uids.map(formatUid).join(', ') : 'no RFID tags';
+    item.innerHTML =
+        `<div class="spoolman-swatches">${swatchesHtml}</div>` +
+        `<div class="spoolman-info">` +
+            `<div class="spoolman-name">${escHtml(name)}${suggested ? '<span class="spoolman-badge">suggested</span>' : ''}</div>` +
+            `<div class="spoolman-meta">${escHtml(meta)}</div>` +
+            `<div class="spoolman-uids">${escHtml(uidsLabel)}</div>` +
+        `</div>` +
+        `<div class="spoolman-right">` +
+            `<div class="spoolman-weight">${escHtml(weight)}</div>` +
+            `<div class="spoolman-id">#${spool.id}</div>` +
+        `</div>`;
+    item.addEventListener('click', () => pickSpool(spool.id));
+    return item;
 }
 
 function renderSpoolList(filter) {
     const list = document.getElementById('spoolman-list');
     const lower = filter.toLowerCase();
+    // Archived spools are invisible to SpoolLink, so they are never offered.
     const filtered = spoolPickerSpools.filter(s => {
-        if (s.is_archived) return false;
+        if (s.archived || s.is_archived) return false;
         if (!lower) return true;
         const name    = (s.filament.name     || '').toLowerCase();
         const material= (s.filament.material || '').toLowerCase();
@@ -743,60 +1123,278 @@ function renderSpoolList(filter) {
         return;
     }
 
+    const currentId = Number(spoolPickerCurrentId);
+    const current = [], suggested = [], rest = [];
+    for (const spool of filtered) {
+        if (Number(spool.id) === currentId) current.push(spool);
+        else if (spoolPickerSuggestedIds.has(Number(spool.id))) suggested.push(spool);
+        else rest.push(spool);
+    }
+
     list.innerHTML = '';
-    filtered.forEach(s => {
-        const item = document.createElement('div');
-        item.className = 'spoolman-item' + (s.id === spoolPickerCurrentId ? ' active' : '');
-        const name     = s.filament.name || s.filament.material || 'Unknown';
-        const vendor   = s.filament.vendor?.name || '';
-        const material = s.filament.material || '';
-        const meta     = [vendor, material].filter(Boolean).join(' · ');
-        const weight   = s.remaining_weight != null ? `${Math.round(s.remaining_weight)} g` : '—';
-        const multiHexes = s.filament.multi_color_hexes
-            ? s.filament.multi_color_hexes.split(',').map(c => c.trim()).filter(Boolean)
-            : null;
-        const swatchColors = (multiHexes && multiHexes.length > 0) ? multiHexes : [s.filament.color_hex || 'CCCCCC'];
-        const swatchesHtml = swatchColors
-            .map(c => `<div class="spoolman-swatch" style="background:#${escHtml(c)}"></div>`)
-            .join('');
-        item.innerHTML =
-            `<div class="spoolman-swatches">${swatchesHtml}</div>` +
-            `<div class="spoolman-info">` +
-                `<div class="spoolman-name">${escHtml(name)}</div>` +
-                `<div class="spoolman-meta">${escHtml(meta)}</div>` +
-            `</div>` +
-            `<div class="spoolman-right">` +
-                `<div class="spoolman-weight">${escHtml(weight)}</div>` +
-                `<div class="spoolman-id">#${s.id}</div>` +
-            `</div>`;
-        item.addEventListener('click', () => pickSpool(s.id));
-        list.appendChild(item);
-    });
+    const groups = [
+        ['Assigned to this extruder', current],
+        ['Suggested spools', suggested],
+        ['All spools', rest],
+    ].filter(([, spools]) => spools.length > 0);
+    for (const [label, spools] of groups) {
+        // A single group is the whole list, so it needs no heading.
+        if (groups.length > 1) {
+            const heading = document.createElement('div');
+            heading.className = 'spoolman-group';
+            heading.textContent = label;
+            list.appendChild(heading);
+        }
+        spools.forEach(spool => list.appendChild(spoolPickerItem(spool)));
+    }
 }
 
 async function pickSpool(spoolId) {
-    if (spoolPickerChannel === null) return;
+    if (spoolPickerChannel === null || spoolAssignmentBusy) return;
     const channel = spoolPickerChannel;
-    closeModal('spoolman-modal');
+    spoolAssignmentBusy = true;
     try {
+        const uid = currentChannelUid(channel);
+        const spools = await fetchSpoolmanList('/v1/spool');
+        ensureChannelUid(channel, uid);
+        const target = spools.find(spool => Number(spool.id) === Number(spoolId));
+        if (!target) throw new Error(`Spool #${spoolId} no longer exists`);
+
+        const owners = uid ? findUidOwners(spools, uid) : [];
+        if (owners.length > 1) {
+            throw new Error(`RFID ${formatUid(uid)} is already stored on multiple spools (${owners.map(owner => `#${owner.id}`).join(', ')}). Resolve the duplicate in Spoolman first.`);
+        }
+        const other = owners.find(owner => Number(owner.id) !== Number(target.id)) || null;
+        const targetUids = parseCardUids(target);
+
+        // Storing the first UID on a spool is the expected case; taking one off
+        // another spool, or adding to a spool that already has tags, is not.
+        if (uid && (other || (targetUids.length > 0 && !targetUids.includes(uid)))) {
+            const rows = [{ label: 'RFID tag', html: uidHtml(uid) }];
+            if (other) rows.push({ label: 'Currently on', value: describeSpool(other) });
+            rows.push({ label: other ? 'Moving to' : 'Adding to', value: describeSpool(target) });
+            if (targetUids.length > 0) {
+                rows.push({ label: 'Already has', html: targetUids.map(uidHtml).join(', ') });
+            }
+            if (!await requestConfirmation(other ? 'Move RFID' : 'Add Another RFID', rows)) return;
+            ensureChannelUid(channel, uid);
+        }
+
+        closeModal('spoolman-modal');
         showStatus('Assigning spool…', 'info');
-        await sendGcode(`SET_SPOOL_ID LANE=E${channel} SPOOL_ID=${spoolId}`);
-        const spool = await fetchSpoolmanSpool(spoolId);
-        if (spool) spoolmanSpools.set(spoolId, spool);
+        await executeSpoolAssignment(channel, target, uid);
         showStatus(`Spool #${spoolId} assigned to Extruder ${channel + 1}`, 'success');
     } catch (err) {
         showStatus(`Failed to assign spool: ${err.message}`, 'error');
+    } finally {
+        spoolAssignmentBusy = false;
     }
 }
 
 async function clearSpoolForChannel(channel) {
+    const assigned = spoolPickerCurrentId != null ? spoolmanSpools.get(Number(spoolPickerCurrentId)) : null;
+    const rows = [
+        { label: 'Extruder', value: String(channel + 1) },
+        { label: 'Assigned to', value: assigned ? describeSpool(assigned)
+            : spoolPickerCurrentId != null ? `Spool #${spoolPickerCurrentId}` : 'Nothing' },
+    ];
+    // SpoolLink unlinks the tag in the extruder too, so the next scan does not
+    // reassign the same spool.
+    const uid = currentChannelUid(channel);
+    if (uid) rows.push({ label: 'Unlinks RFID', html: uidHtml(uid) });
+    if (!await requestConfirmation('Clear Spool', rows)) return;
+
     closeModal('spoolman-modal');
     try {
         showStatus('Clearing spool…', 'info');
         await sendGcode(`SET_SPOOL_ID LANE=E${channel} SPOOL_ID=0`);
         showStatus(`Extruder ${channel + 1} spool cleared`, 'success');
+        if (uid && assigned) {
+            // The unlink runs asynchronously in SpoolLink, after the gcode returns.
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            const spool = await fetchSpoolmanSpool(assigned.id);
+            if (spool) spoolmanSpools.set(Number(spool.id), spool);
+            rebuildFromCache();
+        }
     } catch (err) {
         showStatus(`Failed to clear spool: ${err.message}`, 'error');
+    }
+}
+
+// ── Spool creation ────────────────────────────────────────────────────────
+
+// Spoolman records are created directly, but the RFID link still goes through
+// SET_SPOOL_ID so SpoolLink stays the single writer for UID movement.
+
+function setCreateSpoolNotice(message, type = 'warning') {
+    const notice = document.getElementById('create-spool-notice');
+    notice.textContent = message || '';
+    notice.className = `overwrite-warning${type === 'error' ? ' error' : ''}`;
+    notice.style.display = message ? '' : 'none';
+}
+
+function setCreateSpoolBusy(busy) {
+    if (createSpoolContext) createSpoolContext.busy = busy;
+    document.getElementById('create-spool-submit').textContent = busy ? 'Working…' : 'Create and Assign';
+    for (const id of ['create-spool-submit', 'create-spool-cancel',
+                      'spool-tab-assign', 'spool-tab-create']) {
+        document.getElementById(id).disabled = busy;
+    }
+}
+
+function setCreateSpoolColor(hex) {
+    const color = normalizeColor(hex) || 'CCCCCC';
+    document.getElementById('cs-color-value').value = color;
+    document.getElementById('cs-color-picker').value = `#${color}`;
+}
+
+// Seed the form from the tag, filling what it omits from the palette defaults
+// and the density table. A blank tag gets the defaults alone.
+function applyCreateSpoolDefaults(metadata) {
+    const elements = document.getElementById('create-spool-form').elements;
+    const reportedWeight = finiteNumber(metadata.weight);
+
+    setFilamentValue('createMaterial', cleanText(metadata.type));
+    setFilamentValue('createBrand', cleanText(metadata.vendor));
+    setFilamentValue('createSubtype', cleanText(metadata.variant || metadata.sub_type));
+    setCreateSpoolColor(metadata.color);
+
+    elements.net_weight.value = reportedWeight != null && reportedWeight > 0 ? reportedWeight : 1000;
+    elements.tare_weight.value = '';
+    elements.diameter.value = finiteNumber(metadata.diameter) || 1.75;
+    elements.nozzle_temp.value = finiteNumber(metadata.max_temp) ?? '';
+    elements.bed_temp.value = finiteNumber(metadata.bed_temp) ?? '';
+    syncCreateSpoolDerived();
+}
+
+// Keep the filament name and density in step with material, subtype and
+// colour until the user edits them, as a blank tag is filled in by hand.
+function syncCreateSpoolDerived() {
+    const context = createSpoolContext;
+    if (!context) return;
+    const elements = document.getElementById('create-spool-form').elements;
+    if (!context.edited.has('name')) {
+        elements.name.value = defaultFilamentName(
+            elements.material.value, elements.variant.value, elements.color.value);
+    }
+    if (!context.edited.has('density')) {
+        elements.density.value = materialDensity(elements.material.value, context.metadata.density);
+    }
+}
+
+function prepareCreateSpoolForm(channelNumber) {
+    const channel = channelsData.find(item => item.channel === channelNumber);
+    createSpoolContext = null;
+    document.getElementById('create-spool-form').reset();
+    setCreateSpoolNotice('');
+    setCreateSpoolBusy(false);
+    if (!canCreateSpool(channel)) return;
+
+    const uid = normalizeUid(channel.uid);
+    const metadata = channel.rfid_data || {};
+    createSpoolContext = { channel: channelNumber, uid, metadata, edited: new Set(), busy: false };
+    document.getElementById('create-spool-uid').textContent = formatUid(uid);
+    applyCreateSpoolDefaults(metadata);
+    if (!hasTagFilament(metadata)) {
+        setCreateSpoolNotice('This tag carries no complete filament data. Fill in the filament ' +
+            'details; the new spool is linked to the tag by its UID.');
+    }
+}
+
+function finishCreateSpool(message) {
+    closeModal('spoolman-modal');
+    createSpoolContext = null;
+    showStatus(message, 'success');
+}
+
+// Reuse a vendor case-insensitively, lowest ID first, so repeated creates
+// converge on one record instead of fanning out near-duplicates.
+async function ensureSpoolmanVendor(vendors, vendorName, created) {
+    const wanted = normalizeText(vendorName);
+    const existing = (vendors || [])
+        .filter(vendor => normalizeText(vendor.name) === wanted)
+        .sort((left, right) => Number(left.id) - Number(right.id))[0];
+    if (existing) return existing;
+
+    const vendor = await spoolmanRequest('POST', '/v1/vendor', { body: { name: cleanText(vendorName) } });
+    if (!vendor?.id) throw new Error('Spoolman did not return the created vendor ID');
+    created.push(`vendor #${vendor.id}`);
+    return vendor;
+}
+
+async function handleCreateSpool(event) {
+    event.preventDefault();
+    if (!createSpoolContext || createSpoolContext.busy) return;
+    const context = createSpoolContext;
+    if (!event.currentTarget.reportValidity()) return;
+
+    const created = [];
+    setCreateSpoolBusy(true);
+    setCreateSpoolNotice('Rechecking Spoolman before creating records…');
+
+    try {
+        const values = Object.fromEntries(new FormData(event.currentTarget));
+        // Validate before writing anything, so a rejected field cannot leave a
+        // half-created vendor behind.
+        const filamentPayload = buildFilamentPayload(values, null);
+        const vendorName = cleanText(values.vendor);
+        if (!vendorName) throw new Error('Brand is required');
+
+        ensureChannelUid(context.channel, context.uid);
+        const [spools, vendors, filaments] = await Promise.all([
+            fetchSpoolmanList('/v1/spool'),
+            fetchSpoolmanList('/v1/vendor'),
+            fetchSpoolmanList('/v1/filament'),
+        ]);
+        ensureChannelUid(context.channel, context.uid);
+
+        const owners = findUidOwners(spools, context.uid);
+        if (owners.length > 1) {
+            const ids = owners.map(owner => `#${owner.id}`).join(', ');
+            throw new Error(`This tag is stored on multiple spools (${ids}); resolve the duplicate in Spoolman first`);
+        }
+        if (owners.length === 1) {
+            // SpoolLink linked the tag while the dialog was open; honour that
+            // instead of creating a spool that would fight it for the UID.
+            const owner = owners[0];
+            setCreateSpoolNotice(`The tag was linked to spool #${owner.id} while this dialog was open. Assigning that spool instead…`);
+            await executeSpoolAssignment(context.channel, owner, context.uid);
+            finishCreateSpool(`Existing spool #${owner.id} assigned to Extruder ${context.channel + 1}`);
+            return;
+        }
+
+        let filament = findMatchingFilaments(filaments, values)[0] || null;
+        if (!filament) {
+            const vendor = await ensureSpoolmanVendor(vendors, vendorName, created);
+            filament = await spoolmanRequest('POST', '/v1/filament',
+                { body: { ...filamentPayload, vendor_id: Number(vendor.id) } });
+            if (!filament?.id) throw new Error('Spoolman did not return the created filament ID');
+            created.push(`filament #${filament.id}`);
+        }
+
+        const spool = await spoolmanRequest('POST', '/v1/spool', {
+            body: buildSpoolPayload(filament.id, {
+                uid: context.uid,
+                net_weight: values.net_weight,
+                tare_weight: values.tare_weight,
+            }),
+        });
+        if (!spool?.id) throw new Error('Spoolman did not return the created spool ID');
+        created.push(`spool #${spool.id}`);
+
+        setCreateSpoolNotice(`Spool #${spool.id} created. Linking and verifying its RFID…`);
+        await executeSpoolAssignment(context.channel, spool, context.uid);
+        finishCreateSpool(`Spool #${spool.id} created and assigned to Extruder ${context.channel + 1}`);
+    } catch (err) {
+        // Nothing is rolled back: each record is valid on its own, and a retry
+        // reuses them rather than creating a second set.
+        const retained = created.length
+            ? ` Records already created were kept for a safe retry: ${created.join(', ')}.`
+            : '';
+        setCreateSpoolNotice(`${err.message.replace(/\.$/, '')}.${retained}`, 'error');
+        showStatus(`Create spool failed: ${err.message}`, 'error');
+    } finally {
+        if (createSpoolContext === context) setCreateSpoolBusy(false);
     }
 }
 
@@ -875,9 +1473,34 @@ function closeModal(id) {
 function initializeModals() {
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape') {
+            if (document.getElementById('confirm-modal').style.display !== 'none') {
+                resolveConfirmation(false);
+                return;
+            }
             closeModal('overwrite-modal'); closeModal('spoolman-modal');
             closeModal('mismatch-modal');
         }
+    });
+
+    document.getElementById('confirm-close').addEventListener('click', () => resolveConfirmation(false));
+    document.getElementById('confirm-cancel').addEventListener('click', () => resolveConfirmation(false));
+    document.getElementById('confirm-accept').addEventListener('click', () => resolveConfirmation(true));
+    document.getElementById('confirm-modal').addEventListener('click', e => {
+        if (e.target.id === 'confirm-modal') resolveConfirmation(false);
+    });
+
+    document.getElementById('create-spool-cancel').addEventListener('click', () => closeModal('spoolman-modal'));
+    document.getElementById('create-spool-form').addEventListener('submit', handleCreateSpool);
+    document.getElementById('cs-color-picker').addEventListener('input', e => setCreateSpoolColor(e.target.value));
+    document.getElementById('cs-color-value').addEventListener('input', e => {
+        const color = normalizeColor(e.target.value);
+        if (color) document.getElementById('cs-color-picker').value = `#${color}`;
+    });
+    document.getElementById('create-spool-form').addEventListener('input', e => {
+        if (e.target.name === 'name' || e.target.name === 'density') {
+            createSpoolContext?.edited.add(e.target.name);
+        }
+        syncCreateSpoolDerived();
     });
 
     document.getElementById('mismatch-close').addEventListener('click', () => closeModal('mismatch-modal'));
@@ -920,6 +1543,8 @@ function initializeModals() {
     });
 
     document.getElementById('spoolman-close').addEventListener('click', () => closeModal('spoolman-modal'));
+    document.getElementById('spool-tab-assign').addEventListener('click', () => showSpoolTab('assign'));
+    document.getElementById('spool-tab-create').addEventListener('click', () => showSpoolTab('create'));
     document.getElementById('spoolman-cancel').addEventListener('click', () => closeModal('spoolman-modal'));
     document.getElementById('spoolman-clear').addEventListener('click', () => {
         if (spoolPickerChannel !== null) clearSpoolForChannel(spoolPickerChannel);
@@ -943,11 +1568,12 @@ function initializeModals() {
     document.getElementById('ow-color-opacity').addEventListener('input', updateAllColorPreviews);
     initColorSlots();
 
-    initFilamentPalette('material');
-    initFilamentPalette('brand');
-    initFilamentPalette('subtype');
+    for (const name of Object.keys(FILAMENT_PALETTES)) initFilamentPalette(name);
     document.getElementById('ow-brand-custom').addEventListener('input', e => {
         document.getElementById('ow-brand-value').value = e.target.value.trim();
+    });
+    document.getElementById('cs-brand-custom').addEventListener('input', e => {
+        document.getElementById('cs-brand-value').value = e.target.value.trim();
     });
 }
 
@@ -969,28 +1595,60 @@ async function resetChannel(channel) {
 const FILAMENT_MAX_COLORS = 3;
 
 // Tap-to-select palettes (mirrors repos/PrintTag-Web's material-palette pattern)
+// Palette materials with their nominal densities in g/cm³, used to seed the
+// density field when a tag does not report one.
+const MATERIALS = [
+    ['PLA',     1.24], ['PETG',    1.27], ['ABS',    1.04], ['ASA',    1.07],
+    ['TPU',     1.21], ['PC',      1.19], ['PVA',    1.19], ['NYLON',  1.12],
+    ['PLA-CF',  1.24], ['PETG-CF', 1.27], ['PA-CF',  1.12], ['ABS-GF', 1.04],
+    ['PA',      1.12], ['PC-ABS',  1.19], ['HIPS',   1.04], ['BVOH',   1.19],
+];
+const BRAND_ITEMS = ['Generic', 'Bambu Lab', 'Hatchbox', 'eSun', 'Overture',
+                     'SUNLU', 'Polymaker', 'Prusament', 'Snapmaker', 'Jayo'];
+const SUBTYPE_ITEMS = [{ label: 'None', value: '' }, 'Basic', 'Matte', 'SnapSpeed',
+                       'Silk', 'Support', 'HF', '95A', '95A HF', '90A', '85A',
+                       'Wood', 'Translucent'];
+
 const FILAMENT_PALETTES = {
     material: {
         paletteId: 'ow-material-palette',
         valueId: 'ow-material-value',
-        items: ['PLA', 'PETG', 'ABS', 'ASA', 'TPU', 'PC', 'PVA', 'NYLON',
-                'PLA-CF', 'PETG-CF', 'PA-CF', 'ABS-GF',
-                'PA', 'PC-ABS', 'HIPS', 'BVOH'],
+        items: MATERIALS.map(([name]) => name),
         defaultValue: 'PLA',
     },
     brand: {
         paletteId: 'ow-brand-palette',
         valueId: 'ow-brand-value',
-        items: ['Generic', 'Bambu Lab', 'Hatchbox', 'eSun', 'Overture',
-                'SUNLU', 'Polymaker', 'Prusament', 'Snapmaker', 'Jayo'],
+        items: BRAND_ITEMS,
         defaultValue: 'Generic',
         customInputId: 'ow-brand-custom',
     },
     subtype: {
         paletteId: 'ow-subtype-palette',
         valueId: 'ow-subtype-value',
-        items: [{ label: 'None', value: '' }, 'Basic', 'Matte', 'SnapSpeed', 'Silk', 'Support', 'HF',
-                '95A', '95A HF', '90A', '85A', 'Wood', 'Translucent'],
+        items: SUBTYPE_ITEMS,
+        defaultValue: 'Basic',
+    },
+    // The Create Spool dialog offers the same choices, over its own inputs.
+    createMaterial: {
+        onChange: () => syncCreateSpoolDerived(),
+        paletteId: 'cs-material-palette',
+        valueId: 'cs-material-value',
+        items: MATERIALS.map(([name]) => name),
+        defaultValue: 'PLA',
+    },
+    createBrand: {
+        paletteId: 'cs-brand-palette',
+        valueId: 'cs-brand-value',
+        items: BRAND_ITEMS,
+        defaultValue: 'Generic',
+        customInputId: 'cs-brand-custom',
+    },
+    createSubtype: {
+        onChange: () => syncCreateSpoolDerived(),
+        paletteId: 'cs-subtype-palette',
+        valueId: 'cs-subtype-value',
+        items: SUBTYPE_ITEMS,
         defaultValue: 'Basic',
     },
 };
@@ -1048,6 +1706,7 @@ function setFilamentPaletteValue(name, value) {
     document.querySelectorAll(`#${config.paletteId} .palette-tile`).forEach(tile => {
         tile.classList.toggle('selected', tile.dataset.value === selectedTileValue);
     });
+    config.onChange?.();
 }
 
 // Selects `value`, adding a one-off tile for it first if it isn't one of the

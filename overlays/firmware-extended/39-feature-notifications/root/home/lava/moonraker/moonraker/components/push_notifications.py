@@ -150,6 +150,12 @@ SNAPSHOT_MAX = 5 * 1024 * 1024
 # A pause is reported when it starts; the head moves away from the part
 # afterwards, so the snapshot waits (the bed doesn't lower on a pause).
 PAUSE_SNAPSHOT_DELAY = 3.
+# A runout pause on a toolhead the printer can refill from a backup spool:
+# the printer swaps toolheads within ~10 s and resumes by itself, so the
+# error is held this long and dropped if the refill happens (the "Switched
+# to backup spool" notification says it instead)
+REFILL_WAIT = 25.
+RUNOUT_EXCEPTION_ID = 523
 # Before each attempt, wait this long at most for the printer to have a
 # network (Wi-Fi is often not up yet right after boot). Waiting doesn't
 # count as an attempt; nothing has been sent, so it can't cause doubles.
@@ -540,6 +546,7 @@ class PushNotifications:
             "exclude_object": {}, "machine_state_manager": {},
             **{d: {} for d in DRIVERS}}
         self._calibrating: Optional[int] = None  # main_state of a running one
+        self._refills = 0      # refills from a backup spool seen so far
         self._cal_action: Optional[int] = None   # its last action_code
         self._cal_hold = 0                       # bumps on every action change
 
@@ -1095,7 +1102,11 @@ class PushNotifications:
             # queues, so filament warnings always arrive after it
             self._start_filament_watch(filename, progress, check_start=True)
         elif job_event == JobEvent.PAUSED:
-            if ex is not None and "error" in self.rows:
+            if ex is not None and "error" in self.rows and \
+                    self._refill_expected(ex):
+                self._mark_fault(fault_key(ex))
+                self._spawn(self._runout_hold(filename, ex))
+            elif ex is not None and "error" in self.rows:
                 self._mark_fault(fault_key(ex))
                 self._spawn(self._send(
                     "error", self._title("error", kind="paused"),
@@ -2205,6 +2216,33 @@ class PushNotifications:
             await self._short_alert(filename, issues)
         await self._low_alert(lows)
 
+    def _refill_expected(self, ex: Dict[str, Any]) -> bool:
+        """A filament runout on a toolhead with a backup spool the printer
+        will refill from by itself."""
+        try:
+            runout = int(ex.get("id", -1)) == RUNOUT_EXCEPTION_ID or \
+                "runout" in str(ex.get("message", "")).lower()
+            ch = int(ex.get("index", -1))
+        except (TypeError, ValueError):
+            return False
+        ptc = self._status["print_task_config"]
+        return runout and ch >= 0 and bool(
+            self._backups(ptc, ch, self._job_ptc or None))
+
+    async def _runout_hold(self, filename: str, ex: Dict[str, Any]) -> None:
+        refills = self._refills
+        deadline = time.monotonic() + REFILL_WAIT
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            if self._refills != refills:
+                self._skip("error", "runout refilled from a backup spool "
+                           "(reported as Switched to backup spool)")
+                return
+            if self._status["print_stats"].get("state") != "paused":
+                break       # resumed or ended without a refill being seen
+        await self._send("error", self._title("error", kind="paused"),
+                         f"{shown(filename)}\n{describe(ex)}")
+
     def _check_spool_switch(self) -> None:
         """A slicer filament moved to another toolhead mid-print: the
         printer refilled from a backup spool."""
@@ -2241,6 +2279,7 @@ class PushNotifications:
                              old[tool] + 1, new[tool] + 1)
                 continue
             self._switched_to.add(new[tool])
+            self._refills += 1
             ids = list(ptc.get("filament_spool_id") or [])
             if new[tool] < len(ids) and ids[new[tool]]:
                 self._tool_spools.setdefault(tool, set()).add(ids[new[tool]])

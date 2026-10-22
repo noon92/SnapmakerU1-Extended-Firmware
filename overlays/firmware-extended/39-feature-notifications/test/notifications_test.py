@@ -591,6 +591,54 @@ async def test_spool_switch():
     check("another vendor isn't a refill the printer would do",
           not log, [e["title"] for e in log])
 
+    # A runout with a backup spool: only "switched to backup spool", no
+    # "Error: paused" (the printer refills and resumes by itself)
+    pn.REFILL_WAIT = 1.5
+    for refill in (True, False):
+        reset_world()
+        log = []
+        ntfy = FakeService(log, "ntfy")
+        server, c = make({"spoolman_url": "http://spoolman:7912",
+                          "filament_low_percent": "0",
+                          "filament_low_grams": "0"},
+                         {"spool_switch": [("ntfy", ntfy, False)],
+                          "error": [("ntfy", ntfy, False)],
+                          "resumed": [("ntfy", ntfy, False)]})
+        for sid in (10, 20):
+            SPOOLS[sid] = {"id": sid, "remaining_weight": 500.0,
+                           "initial_weight": 1000,
+                           "filament": {"name": "PLA", "vendor": {"name": "X"},
+                                        "color_hex": "FF0000", "weight": 1000}}
+        META["filament_weight"] = [50.0]
+        STATE["print_task_config"] = {
+            "extruder_map_table": [0, 0], "filament_spool_id": [10, 20],
+            "extruders_used": [True, False], "auto_replenish_filament": True,
+            "replenish_ignore_color": False, "filament_exist": [True, True],
+            "filament_vendor": ["X", "X"], "filament_type": ["PLA", "PLA"],
+            "filament_sub_type": ["", ""],
+            "filament_color_rgba": ["FF0000FF"] * 2}
+        await start_job(server)
+        await asyncio.sleep(0.3)
+        ex = {"id": 523, "index": 0, "code": 0,
+              "message": "e0_filament runout", "level": 2}
+        STATE["print_stats"] = ps("paused", exception=ex)
+        c._status["print_stats"]["state"] = "paused"
+        await server.handlers["job_state:state_changed"](
+            JobEvent.PAUSED, {}, STATE["print_stats"])
+        await asyncio.sleep(0.6)
+        if refill:
+            await c._on_status_update(
+                {"print_task_config": {"extruder_map_table": [1, 0]}}, 0)
+        await asyncio.sleep(2.2)
+        titles = [e["title"].split(" ", 2)[2] for e in log]
+        if refill:
+            check("runout refilled from a backup: no error, just the switch",
+                  titles == ["switched to backup spool"], titles)
+        else:
+            check("runout with no refill: the error after the wait",
+                  titles == ["Error: paused"], titles)
+    pn.REFILL_WAIT = 25.
+
 
 async def test_time_left():
     print("Time left: slicer estimate early, measured later")

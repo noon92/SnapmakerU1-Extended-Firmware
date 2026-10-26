@@ -82,6 +82,7 @@ import moonraker.components.push_notifications as pn  # noqa: E402
 pn.SEND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 pn.PAUSE_SNAPSHOT_DELAY = 0.1
 pn.FILAMENT_POLL = 0.2
+pn.SEND_GAP = {}       # tested on its own in test_send_gap
 
 STATE = {}
 META = {}
@@ -795,6 +796,26 @@ async def test_fault_emoji():
               for g, (_, e) in zip(got, cases)), got)
 
 
+async def test_send_gap():
+    print("ntfy: sends at least the gap apart (second-resolution order)")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    pn.SEND_GAP = {"ntfy": 0.5}
+    try:
+        server, c = make({}, {"started": [("ntfy", ntfy, False)],
+                              "progress_25": [("ntfy", ntfy, False)]})
+        c._spawn(c._send("started", "▶️ U1 started", "x"))
+        c._spawn(c._send("progress_25", "⏳ U1 25%", "x"))
+        await asyncio.sleep(1.2)
+        t = [e["t"] for e in log]
+        check("second send waits for the gap, order kept",
+              [e["title"] for e in log] == ["▶️ U1 started", "⏳ U1 25%"]
+              and len(t) == 2 and t[1] - t[0] >= 0.45, t)
+    finally:
+        pn.SEND_GAP = {}
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -966,7 +987,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_driver_hot,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

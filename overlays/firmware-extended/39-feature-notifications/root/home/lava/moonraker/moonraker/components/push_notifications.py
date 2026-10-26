@@ -206,7 +206,10 @@ RECOVERY_SURE_PROGRESS = 0.10
 # Below this file progress, time left comes from the slicer estimate rather
 # than print time / progress (the first layer alone makes that ratio useless)
 EARLY_PROGRESS = 0.10
-SEND_RETRY_DELAYS = (6, 10, 30)   # seconds before each retry of a failed send
+SEND_RETRY_DELAYS = (6, 10, 30)
+# ntfy timestamps messages to the second and its app orders by that time:
+# two sends this far apart can't share a second and swap places
+SEND_GAP = {"ntfy": 2.}   # seconds before each retry of a failed send
 # Within one service (services never wait on each other), faults go ahead of
 # everything else, and these status notifications are dropped if they could
 # not be sent this long after they happened (e.g. a long outage): a 25%
@@ -391,6 +394,7 @@ class ChannelGate:
         self._tickets: Set[Tuple[int, int]] = set()
         self._busy: Optional[Tuple[int, int]] = None
         self._cond: Optional[asyncio.Condition] = None
+        self.last_sent = -1e9   # monotonic time the last attempt ended
 
     def _condition(self) -> asyncio.Condition:
         if self._cond is None:
@@ -1011,6 +1015,12 @@ class PushNotifications:
                     self._skip(what, "too old (sent more than %d min after "
                                "it happened)" % (STATUS_EXPIRY // 60))
                     return False
+                gap = SEND_GAP.get(dest.channel, 0.)
+                if gap:
+                    # Holding the channel: the next one waits behind this
+                    wait = t.gate.last_sent + gap - time.monotonic()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
                 if dest.email:
                     # Thread headers for email only: a webhook's own
                     # +Header parameters would be wiped
@@ -1031,6 +1041,7 @@ class PushNotifications:
                     ok = await ap.async_notify(
                         body=last, title=title, notify_type=kind)
             finally:
+                t.gate.last_sent = time.monotonic()
                 await t.gate.release(t.ticket)
             if ok:
                 break

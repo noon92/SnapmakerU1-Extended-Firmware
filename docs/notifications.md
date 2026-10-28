@@ -394,7 +394,7 @@ reach it from wherever you want notifications: on your home network, over
 2. **Configure it** in `etc/server.yml`:
 
    ```yaml
-   base-url: "http://192.168.1.10:8080"   # the address your phone uses
+   base-url: "http://192.168.1.10:8080"   # this server, as your phone reaches it
    cache-file: "/var/cache/ntfy/cache.db"
    auth-file: "/var/cache/ntfy/user.db"
    auth-default-access: "deny-all"        # nobody reads or writes without a login
@@ -437,7 +437,7 @@ reach it from wherever you want notifications: on your home network, over
    `etc/server.yml` for an iPhone:
 
    ```yaml
-   base-url: "http://192.168.1.10:8080"   # the address your phone uses
+   base-url: "http://192.168.1.10:8080"   # this server, as your phone reaches it
    cache-file: "/var/cache/ntfy/cache.db"
    auth-file: "/var/cache/ntfy/user.db"
    auth-default-access: "deny-all"
@@ -445,8 +445,10 @@ reach it from wherever you want notifications: on your home network, over
    upstream-base-url: "https://ntfy.sh"
    ```
 
-   Then restart the server (`docker compose restart`, or `docker restart
-   <container>` if you started it with `docker run`). Your server then sends ntfy.sh
+   `base-url` must be exactly the server address you added in the iPhone
+   app: ntfy.sh matches the two by it. Then restart the server (`docker
+   compose restart`, or `docker restart <container>` if you started it with
+   `docker run`). Your server then sends ntfy.sh
    only the message ID and a hash of the topic, never the message itself;
    ntfy.sh wakes the app, and the app fetches the notification from your
    server. Android doesn't need this. See ntfy's

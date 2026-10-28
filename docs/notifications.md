@@ -449,7 +449,8 @@ reach it from wherever you want notifications: on your home network, over
    (A line starting with `#` is a comment: ntfy ignores it.) If your
    `server.yml` doesn't have the line, add it on its own line. Save the file
    and restart the server: `docker compose restart` in the folder from
-   step 1. Your server then sends ntfy.sh
+   step 1 (started with `docker run` instead: `docker restart` followed by
+   the container's name or ID, from `docker ps`). Your server then sends ntfy.sh
    only the message ID and a hash of the topic, never the message itself;
    ntfy.sh wakes the app, and the app fetches the notification from your
    server. Android doesn't need this. See ntfy's

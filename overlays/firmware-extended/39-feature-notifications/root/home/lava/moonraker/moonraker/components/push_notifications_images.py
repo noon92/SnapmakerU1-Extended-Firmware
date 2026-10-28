@@ -229,6 +229,18 @@ def _row_height(row: Dict[str, Any]) -> int:
     return ROW * lines + LINE_GAP * (lines - 1) + note
 
 
+def _warning(d: ImageDraw.ImageDraw, x: float, y: float, size: int) -> None:
+    """A warning sign (as the emoji): yellow triangle, dark "!"."""
+    top = y + 1
+    d.polygon([(x + size / 2, top), (x + size, top + size - 1),
+               (x, top + size - 1)], fill=(242, 184, 0),
+              outline=(150, 110, 0))
+    cx = x + size / 2
+    d.line([cx, top + size * 0.32, cx, top + size * 0.66], fill=INK, width=2)
+    d.ellipse([cx - 1.2, top + size * 0.75, cx + 1.2, top + size * 0.88],
+              fill=INK)
+
+
 def _arrow_right(d: ImageDraw.ImageDraw, x0: float, x1: float,
                  y: float) -> None:
     d.line([x0, y, x1 - 22, y], fill=(45, 48, 54), width=8)
@@ -275,7 +287,17 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
                                COLUMN - 20), False, 16, GREY, center=True)
         if sp.get("match"):
             # A refill spool: the same colour as the toolhead's, or not
-            _text(d, (cx, y + 22), sp["match"], False, 16, GREY, center=True)
+            # (with a warning sign: drawn, the printer has no emoji font)
+            m = sp["match"]
+            if m.startswith("Inexact"):
+                w = d.textlength(m, font=font(False, 16))
+                size = 16
+                gap = 6
+                x = cx - (w + size + gap) / 2
+                _warning(d, x, y + 22, size)
+                _text(d, (x + size + gap, y + 22), m, False, 16, GREY)
+            else:
+                _text(d, (cx, y + 22), m, False, 16, GREY, center=True)
 
     def draw(sp: Dict[str, Any], cx: float, y: int) -> None:
         nonlocal bg

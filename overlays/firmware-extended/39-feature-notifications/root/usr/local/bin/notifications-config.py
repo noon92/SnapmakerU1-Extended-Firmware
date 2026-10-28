@@ -79,7 +79,7 @@ COMPONENTS_DIR = os.environ.get(
 AUTH_MODES = ["none", "token", "basic"]
 
 # Rows that can have a picture but don't by default
-IMAGE_OFF_BY_DEFAULT = {"driver_hot", "macro"}
+IMAGE_OFF_BY_DEFAULT: set = set()
 # id, label, icon, default push, default priority, image ("render",
 # "snapshot", "spool" (drawn spool picture) or None), group, default email
 ROWS = [

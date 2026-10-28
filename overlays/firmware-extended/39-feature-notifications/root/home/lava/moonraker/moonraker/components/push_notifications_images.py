@@ -327,14 +327,16 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
                 x0 = COLUMNS[prev[1]] + COLUMN / 2 - 100
                 x1 = COLUMNS[c] - COLUMN / 2 + 100
                 _arrow_right(d, x0, x1, ay)
-                if k == 0:
-                    _text(d, ((x0 + x1) / 2, ay - 52), "refill", False, 18,
-                          GREY, center=True)
+                _text(d, ((x0 + x1) / 2, ay - 52), "refill", False, 18,
+                      GREY, center=True)
             else:
                 # From under the last spool of the line above, down to the
                 # first of this one
-                _arrow_elbow(d, COLUMNS[prev[1]], line_y(prev[0]) + ROW - 18,
-                             COLUMNS[c], line_y(ln) - 2)
+                ey0, ey1 = line_y(prev[0]) + ROW - 18, line_y(ln) - 2
+                _arrow_elbow(d, COLUMNS[prev[1]], ey0, COLUMNS[c], ey1)
+                _text(d, ((COLUMNS[prev[1]] + COLUMNS[c]) / 2,
+                          ey0 + (ey1 - ey0) * 0.45 - 25), "refill", False,
+                      18, GREY, center=True)
             stack(d, COLUMNS[c], line_y(ln), sp,
                   STATUS_COLOURS.get(sp.get("status"), INK))
             prev = (ln, c)
@@ -346,7 +348,7 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
                       center=True)
         elif len(refills) >= 2:
             _text(d, (WIDTH / 2, y0 + heights[i] - NOTE_H + 2),
-                  "Backup spool order may differ from what's shown.",
+                  "Backup spool order may differ from what's shown",
                   False, 16, GREY, center=True)
         y0 += heights[i]
     bg.convert("RGB").save(path, quality=88)

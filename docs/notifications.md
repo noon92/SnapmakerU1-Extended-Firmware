@@ -399,7 +399,7 @@ reach it from wherever you want notifications: on your home network, over
    auth-file: "/var/cache/ntfy/user.db"
    auth-default-access: "deny-all"        # nobody reads or writes without a login
    attachment-cache-dir: "/var/cache/ntfy/attachments"
-   # upstream-base-url: "https://ntfy.sh" # only for the iPhone app (below)
+   # upstream-base-url: "https://ntfy.sh" # needed for the iPhone app (step 7)
    ```
 
    `base-url` and `attachment-cache-dir` are both needed for the pictures:
@@ -430,9 +430,15 @@ reach it from wherever you want notifications: on your home network, over
    on *instant delivery* for the subscription so notifications don't wait for
    the phone's background sync.
 
-   The iPhone app only wakes up for notifications relayed through ntfy.sh's
-   push service: uncomment `upstream-base-url` in `server.yml` (only a hash of
-   the topic goes to ntfy.sh, not the message).
+7. **iPhone: relay through ntfy.sh, or notifications won't alert.** iOS
+   doesn't let the ntfy app stay connected to your server in the background,
+   and only ntfy.sh can wake it (through Apple's push service). Without this,
+   notifications show up when you open the app, but never alert. Uncomment
+   `upstream-base-url: "https://ntfy.sh"` in `etc/server.yml` and restart
+   the server (`docker compose restart`). Your server then sends ntfy.sh
+   only the message ID and a hash of the topic, never the message itself;
+   ntfy.sh wakes the app, and the app fetches the notification from your
+   server. Android doesn't need this.
 
 **Reaching it from outside your home**: either over [Tailscale](vpn.md) (use
 the server's Tailscale address in Firmware Config and in the app), or behind a
@@ -571,6 +577,9 @@ section in a separate file in `extended/moonraker/` (see
   the service's error just before each). A notification that was
   deliberately skipped is logged as `not sent, ...` with the reason, e.g. an
   error already reported by the pause it caused.
+- **Self-hosted ntfy, iPhone: notifications are in the app but don't
+  alert**: the server needs `upstream-base-url: "https://ntfy.sh"` (see
+  [ntfy server](#ntfy-server), step 7).
 - **No emails**: check the spam folder, and use **Send Test**: `535` means
   the username or password was rejected (Gmail needs an app password, Brevo
   an SMTP key). On Brevo, `525 Unauthorized IP address` means Brevo's IP

@@ -24,7 +24,7 @@ server), and/or to a webhook for home automation.
 
 | Notification | Image | Notes |
 |---|---|---|
-| ▶️ Print started | Model preview | The slicer thumbnail, and the slicer's estimated print time and ETA. With Moonraker's job queue in use: the prints remaining in the queue, including this one, and their total time |
+| ▶️ Print started | Model preview | The slicer thumbnail, and the slicer's estimated print time and ETA. With Moonraker's job queue in use: "Print 1/N remaining in queue", counting this one, and their total time |
 | ⏸️ Print paused / ▶️ Print resumed | Camera | Resumed includes time left and ETA |
 | 🎬 First layer started | Camera | Off by default. When the first layer begins, after the start routine (homing, bed mesh, flow calibration can take a while): time to watch it go down. With time left and ETA |
 | 🔍 1st / 2nd / 3rd layer complete | Camera | Choose after which layer (default: 2nd). With time left and ETA. When printing by object (Orca's *print sequence: by object*), once per object, counted from the object's own first layer, or once per print job |

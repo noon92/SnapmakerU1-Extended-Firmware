@@ -1354,7 +1354,8 @@ class PushNotifications:
             files = [filename] + files
         total = sum(self._estimated_time(f) for f in files)
         n = len(files)
-        line = f"{n} print{'s' if n != 1 else ''} remaining in queue"
+        line = (f"Print 1/{n} remaining in queue" if starting
+                else f"{n} print{'s' if n != 1 else ''} remaining in queue")
         return line + (f" (total {format_duration(total)})" if total > 0
                        else "")
 

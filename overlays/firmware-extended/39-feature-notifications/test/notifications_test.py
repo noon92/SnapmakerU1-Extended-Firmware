@@ -867,13 +867,13 @@ async def test_queue_line():
                      "3": Job("B.gcode")}
     check("at start: includes the print that just started",
           c._queue_line("Benchy.gcode", starting=True)
-          == "3 prints remaining in queue (total 3h 00m)",
+          == "Print 1/3 remaining in queue (total 3h 00m)",
           c._queue_line("Benchy.gcode", starting=True))
     q.queue_state, q.queued_jobs = "ready", {"2": Job("A.gcode"),
                                              "3": Job("B.gcode")}
     check("at start, after the queue took it off: the same",
           c._queue_line("Benchy.gcode", starting=True)
-          == "3 prints remaining in queue (total 3h 00m)")
+          == "Print 1/3 remaining in queue (total 3h 00m)")
     check("at the end: what is still queued",
           c._queue_line("Benchy.gcode", starting=False)
           == "2 prints remaining in queue (total 2h 00m)")

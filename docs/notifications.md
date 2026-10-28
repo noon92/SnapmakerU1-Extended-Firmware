@@ -438,7 +438,8 @@ reach it from wherever you want notifications: on your home network, over
    the server (`docker compose restart`). Your server then sends ntfy.sh
    only the message ID and a hash of the topic, never the message itself;
    ntfy.sh wakes the app, and the app fetches the notification from your
-   server. Android doesn't need this.
+   server. Android doesn't need this. See ntfy's
+   [iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications).
 
 **Reaching it from outside your home**: either over [Tailscale](vpn.md) (use
 the server's Tailscale address in Firmware Config and in the app), or behind a

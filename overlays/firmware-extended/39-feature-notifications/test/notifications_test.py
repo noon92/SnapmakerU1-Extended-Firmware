@@ -121,6 +121,9 @@ class Klippy:
     async def subscribe_objects(self, objs, cb, default=None):
         return {k: copy.deepcopy(STATE.get(k, {})) for k in objs}
 
+    async def get_object_list(self, default=None):
+        return list(STATE)
+
 
 class Resp:
     def __init__(self, code, data):
@@ -886,6 +889,121 @@ async def test_queue_line():
           c._queue_line("Benchy.gcode", starting=True) == "")
 
 
+async def test_chamber():
+    print("Chamber temperature: waiting, reached, faults")
+    nc_mod = None
+    DB = "heater_generic dragonbreath"
+
+    async def setup(extra):
+        nonlocal nc_mod
+        reset_world()
+        STATE.update(extra)
+        log = []
+        ntfy = FakeService(log, "ntfy")
+        server, c = make({}, {r: [("ntfy", ntfy, False)] for r in
+                              ("chamber_waiting", "chamber_reached",
+                               "chamber_fault")})
+        nc_mod = sys.modules[type(c).__module__]
+        await start_job(server)
+        return log, c
+
+    async def upd(c, layer=0, **objs):
+        names = {"db": DB, "cav": "temperature_sensor cavity"}
+        data = {names.get(k, k): v for k, v in objs.items()}
+        data["print_stats"] = ps("printing", info={"current_layer": layer})
+        await c._on_status_update(data, 0)
+    out = lambda log: [(e["title"], e["body"]) for e in log]
+
+    # DragonBreath: M191 S45 waits, releases within 5 °C, first layer
+    log, c = await setup({DB: {"temperature": 25, "target": 0},
+                          "dragonbreath": {"connected": True, "fault": False}})
+    await upd(c, db={"temperature": 30, "target": 45})
+    await upd(c, db={"temperature": 38})
+    await upd(c, db={"temperature": 41})
+    await upd(c, layer=1, db={"temperature": 42})
+    await asyncio.sleep(0.4)
+    check("waiting, then reached when the first layer starts within 5 °C",
+          out(log) == [("🌡️ U1 waiting for chamber temperature",
+                        "Benchy\nChamber 30 °C, target 45 °C.\nPrinter waiting…"),
+                       ("🌡️ U1 chamber temperature reached",
+                        "Benchy\nChamber 42 °C, target 45 °C.\nPrinting…")],
+          out(log))
+    log.clear()
+    await upd(c, layer=2, dragonbreath={"fault": True,
+                                         "fault_reason": "PTC element over-temp"},
+              db={"temperature": 43})
+    await upd(c, layer=2, dragonbreath={"fault": True,
+                                         "fault_reason": "PTC element over-temp"})
+    await upd(c, layer=3, dragonbreath={"connected": False})
+    await asyncio.sleep(0.4)
+    check("a fault while printing (once), and losing DragonBreath",
+          out(log) == [("⚠️ U1 chamber heater fault",
+                        "Benchy\nDragonBreath heater fault: PTC element "
+                        "over-temp.\nPrint job continuing, chamber 43 °C…"),
+                       ("⚠️ U1 chamber heater disconnected",
+                        "Benchy\nDragonBreath heater not responding, should "
+                        "shut off when disconnected from printer.\nPrint job "
+                        "continuing, chamber 43 °C…")], out(log))
+
+    # Waiting: not heating, a fault, and timed out at the first layer
+    log, c = await setup({DB: {"temperature": 25, "target": 0},
+                          "dragonbreath": {"connected": True, "fault": False}})
+    nc_mod.CHAMBER_STALL_TIME = 0.1
+    await upd(c, db={"temperature": 33, "target": 45})
+    await upd(c, db={"temperature": 33.5})
+    await asyncio.sleep(0.15)
+    await upd(c, db={"temperature": 33.6})
+    await upd(c, db={"temperature": 33.6})
+    await upd(c, dragonbreath={"fault": True, "fault_reason": "chamber over-temp"})
+    await upd(c, layer=1, db={"temperature": 34})
+    await asyncio.sleep(0.4)
+    nc_mod.CHAMBER_STALL_TIME = 600.
+    bodies = [b for _t, b in out(log)]
+    check("not heating (once), a fault while waiting, then timed out",
+          [t for t, _b in out(log)] == [
+              "🌡️ U1 waiting for chamber temperature",
+              "⚠️ U1 chamber not heating",
+              "⚠️ U1 chamber heater fault",
+              "⚠️ U1 timed out waiting for chamber temperature, printing anyway"]
+          and bodies[1] == "Benchy\nNo rise in 0 min.\nPrinter still waiting "
+          "for 45 °C (currently 34 °C)…", out(log))
+    check("...with these texts",
+          len(bodies) == 4
+          and bodies[2] == "Benchy\nDragonBreath heater fault: chamber "
+          "over-temp.\nPrinter still waiting for 45 °C (currently 34 °C)…"
+          and bodies[3] == "Benchy\nChamber 34 °C, target 45 °C.\nPrinting "
+          "below target chamber temperature…", bodies)
+
+    # Snapmaker's own wait (purifier connected): reached, and given up
+    for final, title in ((45.2, "🌡️ U1 chamber temperature reached"),
+                         (41, "⚠️ U1 timed out waiting for chamber "
+                              "temperature, printing anyway")):
+        log, c = await setup({
+            "purifier": {"power_detected": True, "desired_chamber_temp": 45},
+            "temperature_sensor cavity": {"temperature": 30},
+            "machine_state_manager": {"main_state": 1, "action_code": 0}})
+        await upd(c, machine_state_manager={"action_code": 3},
+                  cav={"temperature": 32})
+        await asyncio.sleep(0.3)   # minutes apart on a printer
+        await upd(c, cav={"temperature": final})
+        await upd(c, machine_state_manager={"action_code": 0})
+        await upd(c, layer=1)
+        await asyncio.sleep(0.4)
+        check(f"Snapmaker's chamber wait ending at {final} °C",
+              [t for t, _b in out(log)] == [
+                  "🌡️ U1 waiting for chamber temperature", title], out(log))
+
+    # No target from anywhere (bed only; purifier not connected): nothing
+    log, c = await setup({
+        "purifier": {"power_detected": False, "desired_chamber_temp": 45},
+        "temperature_sensor cavity": {"temperature": 30},
+        "machine_state_manager": {"main_state": 1, "action_code": 0}})
+    await upd(c, cav={"temperature": 31})
+    await upd(c, layer=1, cav={"temperature": 32})
+    await asyncio.sleep(0.4)
+    check("no chamber target: no chamber notifications", log == [], out(log))
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -1057,7 +1175,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber,
               test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):

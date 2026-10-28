@@ -340,7 +340,7 @@
 <script>
 (function () {
     const PRIORITY_LABELS = { min: 'Min', low: 'Low', default: 'Default', high: 'High', max: 'Max' };
-    const GROUP_LABELS = { fault: 'Faults', spoolman: 'Spoolman' };
+    const GROUP_LABELS = { chamber: 'Chamber temperature', fault: 'Faults', spoolman: 'Spoolman' };
     let state = null;
     let localWarned = false;  // the local IP popup shows once per opening
     const LOCAL_WARNING = 'With the local IP, the Web UI and Live Camera buttons only work when your phone ' +
@@ -381,6 +381,10 @@
                 : '';
             const calib = meta.id === 'calibration'
                 ? '<span class="nt-sub">Notifies when complete, failed or requires user intervention</span>'
+                : meta.id === 'chamber_waiting'
+                ? '<span class="nt-sub">When a print job waits for a target chamber temperature</span>'
+                : meta.id === 'chamber_fault'
+                ? '<span class="nt-sub">Timed out, not heating, chamber heater faults</span>'
                 : meta.id === 'macro'
                     ? '<span class="nt-sub"><code>RESPOND PREFIX=notify MSG="Title || Message || priority"</code> (priority optional)</span>'
                     : '';

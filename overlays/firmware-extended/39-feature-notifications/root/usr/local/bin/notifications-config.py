@@ -109,6 +109,14 @@ ROWS = [
      "print", False),
     ("calibration", "Manual calibrations", "📐", True, "high", "snapshot",
      "print", False),
+    # Chamber temperature: only when a print job waits on a chamber target
+    # (any chamber heater, or Snapmaker's own chamber wait)
+    ("chamber_waiting", "Waiting for chamber temperature", "🌡️", True,
+     "default", "snapshot", "chamber", False),
+    ("chamber_reached", "Reached chamber temperature", "🌡️", True,
+     "default", "snapshot", "chamber", False),
+    ("chamber_fault", "Chamber faults", "⚠️", True, "high", "snapshot",
+     "chamber", True),
     ("error", "Error", "⚠️", True, "max", "snapshot", "fault", True),
     ("warning", "Warning", "⚠️", True, "max", "snapshot", "fault", True),
 

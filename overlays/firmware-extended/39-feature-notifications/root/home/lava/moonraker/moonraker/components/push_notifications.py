@@ -94,6 +94,7 @@ ROW_IDS = (
     "started", "layer_started", "first_layer", "progress_25", "progress_50", "progress_75",
     "paused", "resumed", "object_complete", "complete", "cancelled",
     "calibration",
+    "chamber_waiting", "chamber_reached", "chamber_fault",
     "macro_min", "macro_low", "macro_default", "macro_high", "macro_max",
     "error", "warning", "shutdown", "power_loss", "driver_hot",
     "filament_short", "filament_low", "spool_switch",
@@ -114,6 +115,13 @@ TITLES = {
     "macro": "📣 {name} {title}",
     "calibration_failed": "📐 {name} {what} failed",
     "intervention": "🖐️ {name} user intervention needed",
+    "chamber_waiting": "🌡️ {name} waiting for chamber temperature",
+    "chamber_reached": "🌡️ {name} chamber temperature reached",
+    "chamber_timeout": "⚠️ {name} timed out waiting for chamber "
+                       "temperature, printing anyway",
+    "chamber_stalled": "⚠️ {name} chamber not heating",
+    "chamber_fault": "⚠️ {name} chamber heater fault",
+    "chamber_disconnected": "⚠️ {name} chamber heater disconnected",
     "error": "⚠️ {name} Error: {kind}",
     "warning": "⚠️ {name} Warning",
     "shutdown": "🛑 {name} Error: shutdown",
@@ -144,6 +152,21 @@ MANUAL_CLEAN = {192: 1, 193: 2, 194: 3, 195: 4}
 # reported as idle; the gaps between them are a second or two.
 INTERVENTION_HOLD = 15.
 FAULT_ROWS = ("error", "warning", "shutdown")
+# Chamber temperature, whatever heats the chamber: a print job "waits" when,
+# before its first layer, there is a chamber target and the chamber is below
+# it. Targets come from any heater_generic (DragonBreath, Panda Breath,
+# others; M141/M191) or Snapmaker's own chamber wait (WAIT_CHAMBER_TEMP,
+# which only runs with Snapmaker's purifier connected and shows as action
+# PREHEAT_CHAMBER). M191 releases a few degrees short of the target
+# (DragonBreath: 5 °C), so within this of it counts as reached.
+CHAMBER_ROWS = ("chamber_waiting", "chamber_reached", "chamber_fault")
+CHAMBER_TOLERANCE = 5.
+# Waiting with no rise of this much for this long: "not heating"
+CHAMBER_STALL_RISE = 1.
+CHAMBER_STALL_TIME = 600.
+CHAMBER_SENSOR = "temperature_sensor cavity"
+ACTION_PREHEAT_CHAMBER = 3
+DRAGONBREATH = "dragonbreath"
 ERROR_INDEX_URL = ("https://wiki.snapmaker.com/en/snapmaker_u1/"
                    "troubleshooting/u1_error_codes")
 ORDINALS = {1: "1st", 2: "2nd", 3: "3rd"}
@@ -182,7 +205,8 @@ BODY_LIMITS = {"pushover": (True, 1024), "ntfy": (False, 4000),
                "telegram": (True, 3500), "discord": (True, 3500)}
 # Discord's embed colour (Apprise notification type) for each notification
 NOTIFY_TYPES = {"complete": "success", "object_complete": "success",
-                "calibration": "success",
+                "calibration": "success", "chamber_reached": "success",
+                "chamber_fault": "warning",
                 "driver_hot": "warning", "error": "failure",
                 "warning": "failure", "shutdown": "failure",
                 "power_loss": "failure", "filament_short": "failure",
@@ -195,6 +219,7 @@ THREAD_ROWS = ("started", "layer_started", "first_layer",
                "progress_25", "progress_50",
                "progress_75", "paused", "resumed", "object_complete",
                "complete", "cancelled",
+               "chamber_waiting", "chamber_reached", "chamber_fault",
                "filament_short", "filament_low", "spool_switch")
 THREAD_FAULT_WINDOW = 120.
 NAME_CAP_MIN = 8
@@ -219,9 +244,11 @@ SEND_GAP = {"ntfy": 2.}   # seconds before each retry of a failed send
 # everything else, and these status notifications are dropped if they could
 # not be sent this long after they happened (e.g. a long outage): a 25%
 # notification an hour late is noise. Faults and complete never expire.
-URGENT_ROWS = ("error", "warning", "shutdown", "power_loss")
+URGENT_ROWS = ("error", "warning", "shutdown", "power_loss",
+               "chamber_fault")
 EXPIRING_ROWS = ("started", "layer_started", "first_layer", "progress_25",
-                 "progress_50", "progress_75", "object_complete")
+                 "progress_50", "progress_75", "object_complete",
+                 "chamber_waiting", "chamber_reached")
 STATUS_EXPIRY = 300.
 # Spoolman usage counts as tracked once spools lost this much; if nothing
 # was used by this far into the file, it isn't tracked and the filament
@@ -598,6 +625,14 @@ class PushNotifications:
             "print_stats": {}, "virtual_sdcard": {}, "print_task_config": {},
             "exclude_object": {}, "machine_state_manager": {},
             **{d: {} for d in DRIVERS}}
+        # Chamber: the printer's heater_generic objects, whether it has
+        # Snapmaker's chamber sensor / purifier / a DragonBreath (found at
+        # klippy_ready), and this job's chamber state (see _track_chamber)
+        self._ch_heaters: List[str] = []
+        self._ch_sensor = False
+        self._ch_purifier = False
+        self._ch_device = False
+        self._ch: Dict[str, Any] = {}
         self._calibrating: Optional[int] = None  # main_state of a running one
         self._refills = 0      # refills from a backup spool seen so far
         self._cal_action: Optional[int] = None   # its last action_code
@@ -1246,6 +1281,11 @@ class PushNotifications:
         self._first_layer_sent = int(layer) > self.layers_complete
         self._layer_started_sent = int(layer) >= 1
         self._driver_hot_sent = False
+        # Chamber: a job joined past its first layer has no wait to report
+        self._ch = {"phase": "done" if int(layer) >= 1 else "none",
+                    "target": 0., "source": "", "ref": None, "ref_time": 0.,
+                    "stall_sent": False, "used": False, "faults": set(),
+                    "fault": None, "connected": None}
         self._by_object = await self.eventloop.run_in_thread(
             self._is_by_object, filename)
         self._obj_start = {}
@@ -1442,6 +1482,146 @@ class PushNotifications:
         elif action == 0:
             self._spawn(self._intervention_hold(self._cal_hold, what))
 
+    # ---- chamber temperature -------------------------------------------
+
+    def _chamber_now(self) -> Tuple[float, Optional[float], str]:
+        """(target, chamber temperature, source) right now: the first
+        heater_generic with a target, else Snapmaker's chamber wait while it
+        runs. No target: (0, None, "")."""
+        for h in self._ch_heaters:
+            st = self._status.get(h) or {}
+            try:
+                target = float(st.get("target") or 0.)
+                temp = st.get("temperature")
+                if target > 0:
+                    return target, (None if temp is None else float(temp)), h
+            except (TypeError, ValueError):
+                continue
+        pur = self._status.get("purifier") or {}
+        msm = self._status["machine_state_manager"]
+        try:
+            target = float(pur.get("desired_chamber_temp") or 0.)
+            action = int(msm.get("action_code") or 0)
+        except (TypeError, ValueError):
+            return 0., None, ""
+        if pur.get("power_detected") and target > 0:
+            temp = (self._status.get(CHAMBER_SENSOR) or {}).get("temperature")
+            waiting = action == ACTION_PREHEAT_CHAMBER
+            return target, (None if temp is None else float(temp)), \
+                "purifier" if waiting else "purifier_idle"
+        return 0., None, ""
+
+    def _track_chamber(self) -> None:
+        """Before the first layer: waiting / reached / timed out / not
+        heating. Through the whole job: DragonBreath faults and losing it."""
+        ch = self._ch
+        ps = self._status["print_stats"]
+        filename = shown(ps.get("filename") or self._job_filename)
+        layer = (ps.get("info") or {}).get("current_layer")
+        try:
+            layer = int(layer or 0)
+        except (TypeError, ValueError):
+            layer = 0
+        target, temp, source = self._chamber_now()
+        if source == DRAGONBREATH or source.endswith(" " + DRAGONBREATH):
+            ch["used"] = True
+        now = time.monotonic()
+        deg = lambda t: f"{t:.0f} °C"
+        state = lambda t, T: f"Chamber {deg(t)}, target {deg(T)}."
+        if ch["phase"] in ("none", "waiting") and temp is not None:
+            if layer >= 1:
+                if ch["phase"] == "waiting":
+                    T = ch["target"]
+                    if temp >= T - CHAMBER_TOLERANCE:
+                        self._chamber_send("chamber_reached", "chamber_reached",
+                                           filename, state(temp, T),
+                                           "Printing…")
+                    else:
+                        self._chamber_send("chamber_fault", "chamber_timeout",
+                                           filename, state(temp, T),
+                                           "Printing below target chamber "
+                                           "temperature…")
+                ch["phase"] = "done"
+            elif ch["phase"] == "none" and target > 0 and \
+                    source != "purifier_idle" and (
+                        temp < target if source == "purifier"
+                        else temp < target - CHAMBER_TOLERANCE):
+                ch.update(phase="waiting", target=target, source=source,
+                          ref=temp, ref_time=now)
+                self._chamber_send("chamber_waiting", "chamber_waiting",
+                                   filename, state(temp, target),
+                                   "Printer waiting…")
+            elif ch["phase"] == "waiting":
+                if target > 0 and source != "purifier_idle":
+                    ch["target"] = target
+                T = ch["target"]
+                purifier_done = ch["source"] == "purifier" and \
+                    source != "purifier"
+                if temp >= T or purifier_done:
+                    if temp >= T:
+                        self._chamber_send("chamber_reached",
+                                           "chamber_reached", filename,
+                                           state(temp, T), "Printing…")
+                    else:
+                        # Snapmaker's wait gave up (no rise for its TIMEOUT)
+                        self._chamber_send("chamber_fault", "chamber_timeout",
+                                           filename, state(temp, T),
+                                           "Printing below target chamber "
+                                           "temperature…")
+                    ch["phase"] = "done"
+                elif ch["ref"] is None or \
+                        temp >= ch["ref"] + CHAMBER_STALL_RISE:
+                    ch.update(ref=temp, ref_time=now)
+                elif not ch["stall_sent"] and \
+                        now - ch["ref_time"] >= CHAMBER_STALL_TIME:
+                    ch["stall_sent"] = True
+                    self._chamber_send(
+                        "chamber_fault", "chamber_stalled", filename,
+                        f"No rise in {CHAMBER_STALL_TIME / 60:.0f} min.",
+                        f"Printer still waiting for {deg(T)} "
+                        f"(currently {deg(temp)})…")
+        if not self._ch_device:
+            return
+        dev = self._status.get(DRAGONBREATH) or {}
+        if not ch["used"]:
+            ch["connected"] = dev.get("connected")
+            return
+
+        def next_line() -> str:
+            t = (self._status.get(f"heater_generic {DRAGONBREATH}") or {}) \
+                .get("temperature")
+            t = temp if t is None else float(t)
+            if ch["phase"] == "waiting":
+                return (f"Printer still waiting for {deg(ch['target'])}"
+                        + (f" (currently {deg(t)})…" if t is not None
+                           else "…"))
+            return ("Print job continuing"
+                    + (f", chamber {deg(t)}…" if t is not None else "…"))
+        connected = dev.get("connected")
+        if ch["connected"] and connected is False:
+            self._chamber_send(
+                "chamber_fault", "chamber_disconnected", filename,
+                "DragonBreath heater not responding, should shut off when "
+                "disconnected from printer.", next_line())
+        ch["connected"] = connected
+        reason = str(dev.get("fault_reason") or "fault").strip()
+        if dev.get("fault"):
+            if ch["fault"] != reason and reason not in ch["faults"]:
+                ch["faults"].add(reason)
+                self._chamber_send(
+                    "chamber_fault", "chamber_fault", filename,
+                    f"DragonBreath heater fault: {reason}.", next_line())
+            ch["fault"] = reason
+        else:
+            ch["fault"] = None
+
+    def _chamber_send(self, rid: str, title: str, filename: str,
+                      *lines: str) -> None:
+        if rid not in self.rows:
+            return
+        self._spawn(self._send(rid, self._title(title),
+                               self._lines(filename, *lines)))
+
     async def _intervention_hold(self, hold: int, what: str) -> None:
         await asyncio.sleep(INTERVENTION_HOLD)
         if hold != self._cal_hold or self._job_active:
@@ -1522,6 +1702,27 @@ class PushNotifications:
         first_ready = not self._ready_once
         self._ready_once = True
         kapis: APIComp = self.server.lookup_component("klippy_apis")
+        chamber = {}
+        if any(r in self.rows for r in CHAMBER_ROWS):
+            try:
+                objs = await kapis.get_object_list(default=[])
+            except Exception:
+                objs = []
+            self._ch_heaters = [o for o in objs
+                                if o.startswith("heater_generic ")]
+            self._ch_sensor = CHAMBER_SENSOR in objs
+            self._ch_purifier = "purifier" in objs
+            self._ch_device = DRAGONBREATH in objs
+            chamber = dict(
+                {h: ["temperature", "target"] for h in self._ch_heaters},
+                **({CHAMBER_SENSOR: ["temperature"]}
+                   if self._ch_sensor else {}),
+                **({"purifier": ["power_detected", "desired_chamber_temp"]}
+                   if self._ch_purifier else {}),
+                **({DRAGONBREATH: ["fault", "fault_reason", "connected"]}
+                   if self._ch_device else {}))
+            for obj in chamber:
+                self._status.setdefault(obj, {})
         try:
             status = await kapis.subscribe_objects(
                 dict({"print_stats": ["state", "filename", "info",
@@ -1534,7 +1735,9 @@ class PushNotifications:
                         if self._spoolman_active() else {}),
                      **({"machine_state_manager": ["main_state",
                                                    "action_code"]}
-                        if "calibration" in self.rows else {})),
+                        if "calibration" in self.rows
+                        or self._ch_purifier else {}),
+                     **chamber),
                 self._on_status_update, default={})
         except Exception as e:
             logging.error("[push_notifications] subscribe failed: %s", e)
@@ -1565,6 +1768,8 @@ class PushNotifications:
             self._check_spool_switch()
         if "machine_state_manager" in data:
             self._track_calibration()
+        if self._job_active and self._ch:
+            self._track_chamber()
         if not self._job_active or ps.get("state") != "printing":
             return
         filename = ps.get("filename") or ""

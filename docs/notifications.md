@@ -394,7 +394,7 @@ reach it from wherever you want notifications: on your home network, over
 2. **Configure it** in `etc/server.yml`:
 
    ```yaml
-   base-url: "http://192.168.1.10:8080"   # this server, as your phone reaches it
+   base-url: "http://192.168.1.10:8080"   # IP address or domain name of your ntfy server
    cache-file: "/var/cache/ntfy/cache.db"
    auth-file: "/var/cache/ntfy/user.db"
    auth-default-access: "deny-all"        # nobody reads or writes without a login
@@ -437,7 +437,7 @@ reach it from wherever you want notifications: on your home network, over
    `etc/server.yml` for an iPhone:
 
    ```yaml
-   base-url: "http://192.168.1.10:8080"   # this server, as your phone reaches it
+   base-url: "http://192.168.1.10:8080"   # IP address or domain name of your ntfy server
    cache-file: "/var/cache/ntfy/cache.db"
    auth-file: "/var/cache/ntfy/user.db"
    auth-default-access: "deny-all"

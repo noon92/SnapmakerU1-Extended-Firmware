@@ -434,23 +434,15 @@ reach it from wherever you want notifications: on your home network, over
    doesn't let the ntfy app stay connected to your server in the background,
    and only ntfy.sh can wake it (through Apple's push service). Without this,
    notifications show up when you open the app, but never alert. In
-   `etc/server.yml`, find this line:
+   `etc/server.yml`, uncomment (remove the `#` from the start of) the
+   `upstream-base-url` line, or add it if it's missing:
 
    ```yaml
-   # upstream-base-url: "https://ntfy.sh" # needed for the iPhone app (step 7)
+   upstream-base-url: "https://ntfy.sh"
    ```
 
-   and delete the `#` and the space at the start, so it reads:
-
-   ```yaml
-   upstream-base-url: "https://ntfy.sh" # needed for the iPhone app (step 7)
-   ```
-
-   (A line starting with `#` is a comment: ntfy ignores it.) If your
-   `server.yml` doesn't have the line, add it on its own line. Save the file
-   and restart the server: `docker compose restart` in the folder from
-   step 1 (started with `docker run` instead: `docker restart` followed by
-   the container's name or ID, from `docker ps`). Your server then sends ntfy.sh
+   Then restart the server (`docker compose restart`, or `docker restart
+   <container>` if you started it with `docker run`). Your server then sends ntfy.sh
    only the message ID and a hash of the topic, never the message itself;
    ntfy.sh wakes the app, and the app fetches the notification from your
    server. Android doesn't need this. See ntfy's

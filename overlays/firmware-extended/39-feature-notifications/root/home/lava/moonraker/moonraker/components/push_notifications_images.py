@@ -6,7 +6,10 @@
 #
 # One row per toolhead: its spool, drawn in the filament's colour and filled
 # to how much is left (10% steps of a full spool; under 10% shows a few
-# wraps), with an optional arrow to the spool the printer refills from.
+# wraps), with arrows to the spools the printer refills from, in the order
+# it would use them. The toolhead's own spool has the left column to
+# itself; a chain longer than two backups wraps to a second line, joined
+# by an elbow arrow (down, left, down).
 # Colours: red = not enough, orange = may be insufficient / running low,
 # green = enough. Uses Pillow only (no numpy).
 #
@@ -27,12 +30,13 @@ INK: RGB = (32, 34, 38)
 GREY: RGB = (95, 98, 105)
 STATUS_COLOURS = {"red": RED, "orange": ORANGE, "green": GREEN, "ink": INK}
 
-WIDTH = 760
-ROW = 330
+WIDTH = 900
+ROW = 330          # one line of spools
+LINE_GAP = 44      # between the lines of a wrapped chain (the elbow arrow)
+NOTE_H = 30        # the "order may differ" note under a chain
 COLUMN = 300       # width of each spool's column
-LEFT = 190         # centre of the toolhead's column
-RIGHT = 570        # centre of the refill's column (or the note)
-ARROW = 380        # centre of the arrow between them
+COLUMNS = (150, 450, 750)   # centres: toolhead, then its refill spools
+NOTE_X = 600       # centre of the no-refill note (the two right columns)
 SPOOL = 170        # spool height in px
 SQUASH = 0.5       # side view at ~60 degrees
 DEPTH = 0.32       # spool width between flanges, fraction of its height
@@ -210,16 +214,50 @@ def _background(height: int) -> Image.Image:
     return bg
 
 
+def _layout(row: Dict[str, Any]) -> List[Tuple[int, int]]:
+    """(line, column) of each refill spool: the first line holds up to
+    two after the toolhead's own; later lines up to two, never in the
+    toolhead's (left) column."""
+    return [(0, 1 + k) if k < 2 else (1 + (k - 2) // 2, 1 + (k - 2) % 2)
+            for k in range(len(row.get("refills") or []))]
+
+
+def _row_height(row: Dict[str, Any]) -> int:
+    places = _layout(row)
+    lines = 1 + max((ln for ln, _c in places), default=0)
+    note = NOTE_H if len(places) >= 2 else 0
+    return ROW * lines + LINE_GAP * (lines - 1) + note
+
+
+def _arrow_right(d: ImageDraw.ImageDraw, x0: float, x1: float,
+                 y: float) -> None:
+    d.line([x0, y, x1 - 22, y], fill=(45, 48, 54), width=8)
+    d.polygon([(x1, y), (x1 - 28, y - 21), (x1 - 28, y + 21)],
+              fill=(45, 48, 54))
+
+
+def _arrow_elbow(d: ImageDraw.ImageDraw, x0: float, y0: float, x1: float,
+                 y1: float) -> None:
+    """Down from (x0, y0), left to x1, down to (x1, y1)."""
+    mid = y0 + (y1 - y0) * 0.45
+    d.line([(x0, y0), (x0, mid), (x1, mid), (x1, y1 - 18)],
+           fill=(45, 48, 54), width=6, joint="curve")
+    d.polygon([(x1, y1), (x1 - 15, y1 - 22), (x1 + 15, y1 - 22)],
+              fill=(45, 48, 54))
+
+
 def render(rows: List[Dict[str, Any]], path: str) -> str:
     """Draw the rows and save a JPEG at `path`. Each row:
       toolhead, word, status, needs (str or ""), remaining, full, colour,
-      name, and optionally refill = {toolhead, remaining, full, colour,
-      name, status} or note = [lines].
-    Both spools are drawn as the same stack: toolhead above, amount left,
-    what it needs (left spool only) and the filament's name below. `word`
-    is not drawn: the colour and the amounts say it.
+      name, and optionally refills = [{toolhead, remaining, full, colour,
+      name, status}, ...] (in the order the printer uses them) or
+      note = [lines].
+    Every spool is drawn as the same stack: toolhead above, amount left,
+    what it needs (the toolhead's own spool only) and the filament's name
+    below. `word` is not drawn: the colour and the amounts say it.
     """
-    height = ROW * len(rows) + 12
+    heights = [_row_height(r) for r in rows]
+    height = sum(heights) + 12
     bg = _background(height)
 
     def stack(d: ImageDraw.ImageDraw, cx: float, y0: int, sp: Dict[str, Any],
@@ -236,37 +274,56 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
         _text(d, (cx, y), _fit(d, sp.get("name") or "", font(False, 16),
                                COLUMN - 20), False, 16, GREY, center=True)
 
+    def draw(sp: Dict[str, Any], cx: float, y: int) -> None:
+        nonlocal bg
+        bg = _put(bg, cx, y + 40, spool(
+            UNKNOWN_FILL if sp.get("unknown")
+            else level(sp["remaining"], sp.get("full")),
+            sp.get("colour") or (200, 200, 200)))
+
+    y0 = 6
     for i, row in enumerate(rows):
-        y0 = 6 + i * ROW
         col = STATUS_COLOURS.get(row["status"], INK)
-        refill = row.get("refill")
-        for cx, sp in ((LEFT, row), (RIGHT, refill)):
-            if sp:
-                bg = _put(bg, cx, y0 + 40, spool(
-                    UNKNOWN_FILL if sp.get("unknown")
-                    else level(sp["remaining"], sp.get("full")),
-                    sp.get("colour") or (200, 200, 200)))
+        refills = row.get("refills") or []
+        places = _layout(row)
+        line_y = lambda ln: y0 + ln * (ROW + LINE_GAP)
+        draw(row, COLUMNS[0], y0)
+        for sp, (ln, c) in zip(refills, places):
+            draw(sp, COLUMNS[c], line_y(ln))
         d = ImageDraw.Draw(bg)
         if i:
             d.line([40, y0 - 4, WIDTH - 40, y0 - 4], fill=(190, 193, 200),
                    width=2)
-        stack(d, LEFT, y0, row, col, row.get("needs") or "")
-        if refill:
-            ay = y0 + 40 + SPOOL // 2
-            x0, x1 = ARROW - 50, ARROW + 50
-            d.line([x0, ay, x1 - 22, ay], fill=(45, 48, 54), width=8)
-            d.polygon([(x1, ay), (x1 - 28, ay - 21), (x1 - 28, ay + 21)],
-                      fill=(45, 48, 54))
-            _text(d, (ARROW, ay - 52), "refill", False, 18, GREY,
-                  center=True)
-            stack(d, RIGHT, y0, refill,
-                  STATUS_COLOURS.get(refill.get("status"), INK))
-        else:
+        stack(d, COLUMNS[0], y0, row, col, row.get("needs") or "")
+        prev = (0, 0)
+        for k, (sp, (ln, c)) in enumerate(zip(refills, places)):
+            if ln == prev[0]:
+                ay = line_y(ln) + 40 + SPOOL // 2
+                x0 = COLUMNS[prev[1]] + COLUMN / 2 - 100
+                x1 = COLUMNS[c] - COLUMN / 2 + 100
+                _arrow_right(d, x0, x1, ay)
+                if k == 0:
+                    _text(d, ((x0 + x1) / 2, ay - 52), "refill", False, 18,
+                          GREY, center=True)
+            else:
+                # From under the last spool of the line above, down to the
+                # first of this one
+                _arrow_elbow(d, COLUMNS[prev[1]], line_y(prev[0]) + ROW - 18,
+                             COLUMNS[c], line_y(ln) - 2)
+            stack(d, COLUMNS[c], line_y(ln), sp,
+                  STATUS_COLOURS.get(sp.get("status"), INK))
+            prev = (ln, c)
+        if not refills:
             lines = row.get("note") or []
             y = y0 + 40 + SPOOL // 2 - 15 * len(lines)
             for k, line in enumerate(lines):
-                _text(d, (RIGHT, y + k * 30), line, False, 20, GREY,
+                _text(d, (NOTE_X, y + k * 30), line, False, 20, GREY,
                       center=True)
+        elif len(refills) >= 2:
+            _text(d, (WIDTH / 2, y0 + heights[i] - NOTE_H + 2),
+                  "Backup spool order may differ from what's shown.",
+                  False, 16, GREY, center=True)
+        y0 += heights[i]
     bg.convert("RGB").save(path, quality=88)
     return path
 

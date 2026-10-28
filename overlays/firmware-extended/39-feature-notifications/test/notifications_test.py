@@ -1004,6 +1004,29 @@ async def test_chamber():
     check("no chamber target: no chamber notifications", log == [], out(log))
 
 
+async def test_backup_order():
+    print("Backup spools: in the order the printer uses them")
+    reset_world()
+    _server, c = make({}, {})
+    B = type(c)._backups
+    ptc = dict(auto_replenish_filament=True, replenish_ignore_color=True,
+               filament_spool_id=[1, 2, 3, 4], filament_exist=[1, 1, 1, 1],
+               filament_type=["PLA"] * 4, filament_vendor=["Elegoo"] * 4,
+               filament_sub_type=["Basic"] * 4,
+               filament_color_rgba=["0000FFFF", "3030F0FF", "0000FFFF",
+                                    "FF0000FF"])
+    check("exact colour first (even past a closer index), then nearest",
+          B(ptc, 0) == [2, 1, 3], B(ptc, 0))
+    check("colour not ignored: exact matches only, in toolhead order",
+          B(dict(ptc, replenish_ignore_color=False), 0) == [2],
+          B(dict(ptc, replenish_ignore_color=False), 0))
+    check("other vendor/type is never used",
+          B(dict(ptc, filament_type=["PLA", "PETG", "PLA", "PLA"]), 0)
+          == [2, 3])
+    check("refill off: none", B(dict(ptc, auto_replenish_filament=False), 0)
+          == [])
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -1175,7 +1198,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber, test_backup_order,
               test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):

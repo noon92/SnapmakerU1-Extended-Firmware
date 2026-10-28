@@ -433,9 +433,23 @@ reach it from wherever you want notifications: on your home network, over
 7. **iPhone: relay through ntfy.sh, or notifications won't alert.** iOS
    doesn't let the ntfy app stay connected to your server in the background,
    and only ntfy.sh can wake it (through Apple's push service). Without this,
-   notifications show up when you open the app, but never alert. Uncomment
-   `upstream-base-url: "https://ntfy.sh"` in `etc/server.yml` and restart
-   the server (`docker compose restart`). Your server then sends ntfy.sh
+   notifications show up when you open the app, but never alert. In
+   `etc/server.yml`, find this line:
+
+   ```yaml
+   # upstream-base-url: "https://ntfy.sh" # needed for the iPhone app (step 7)
+   ```
+
+   and delete the `#` and the space at the start, so it reads:
+
+   ```yaml
+   upstream-base-url: "https://ntfy.sh" # needed for the iPhone app (step 7)
+   ```
+
+   (A line starting with `#` is a comment: ntfy ignores it.) If your
+   `server.yml` doesn't have the line, add it on its own line. Save the file
+   and restart the server: `docker compose restart` in the folder from
+   step 1. Your server then sends ntfy.sh
    only the message ID and a hash of the topic, never the message itself;
    ntfy.sh wakes the app, and the app fetches the notification from your
    server. Android doesn't need this. See ntfy's

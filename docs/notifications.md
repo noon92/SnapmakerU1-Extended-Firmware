@@ -433,11 +433,15 @@ reach it from wherever you want notifications: on your home network, over
 7. **iPhone: relay through ntfy.sh, or notifications won't alert.** iOS
    doesn't let the ntfy app stay connected to your server in the background,
    and only ntfy.sh can wake it (through Apple's push service). Without this,
-   notifications show up when you open the app, but never alert. In
-   `etc/server.yml`, uncomment (remove the `#` from the start of) the
-   `upstream-base-url` line, or add it if it's missing:
+   notifications show up when you open the app, but never alert. Your
+   `etc/server.yml` for an iPhone:
 
    ```yaml
+   base-url: "http://192.168.1.10:8080"   # the address your phone uses
+   cache-file: "/var/cache/ntfy/cache.db"
+   auth-file: "/var/cache/ntfy/user.db"
+   auth-default-access: "deny-all"
+   attachment-cache-dir: "/var/cache/ntfy/attachments"
    upstream-base-url: "https://ntfy.sh"
    ```
 

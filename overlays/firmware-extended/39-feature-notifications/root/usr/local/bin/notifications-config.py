@@ -79,7 +79,7 @@ COMPONENTS_DIR = os.environ.get(
 AUTH_MODES = ["none", "token", "basic"]
 
 # Rows that can have a picture but don't by default
-IMAGE_OFF_BY_DEFAULT = {"driver_hot"}
+IMAGE_OFF_BY_DEFAULT = {"driver_hot", "macro"}
 # id, label, icon, default push, default priority, image ("render",
 # "snapshot", "spool" (drawn spool picture) or None), group, default email
 ROWS = [
@@ -104,6 +104,8 @@ ROWS = [
     ("complete", "Print complete", "✅", True, "default", "snapshot", "print",
      False),
     ("cancelled", "Print cancelled", "🚫", True, "default", "snapshot",
+     "print", False),
+    ("macro", "From macros and G-code", "📣", True, "default", "snapshot",
      "print", False),
     ("calibration", "Manual calibrations", "📐", True, "high", "snapshot",
      "print", False),
@@ -1019,6 +1021,22 @@ def render_moonraker(s, sec=None):
             out.append(f"camera_url: {root}{LIVE_PATH[s['camera']]}")
     for rid in rows:
         kind = image_kind(s, rid, cam)
+        if rid == "macro":
+            # One set of destinations per priority: a RESPOND PREFIX=notify
+            # line may name its own; the row's priority is the default
+            out.append(f"macro_priority: {s['rows'][rid]['priority']}")
+            for p in PRIORITIES:
+                name = f"macro_{p}"
+                if rid in push:
+                    pkind = "none" if s["provider"] == "gotify" else kind
+                    out.append(f"{name}: {pkind}, "
+                               f"{row_url(s, rid, p, cam, sec)}")
+                if rid in email:
+                    out.append(f"{name}_email: {kind}, {email_url(s, sec)}")
+                if rid in hook:
+                    out.append(f"{name}_webhook: {kind}, "
+                               f"{webhook_url(s, 'macro', cam, sec)}")
+            continue
         # The object-complete notification follows the Print complete row
         for name in ([rid, OBJECT_ROW] if rid == "complete"
                      and s["complete_objects"] == "each" else [rid]):

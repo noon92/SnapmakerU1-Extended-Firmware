@@ -816,6 +816,30 @@ async def test_send_gap():
         pn.SEND_GAP = {}
 
 
+async def test_macro_notify():
+    print("Notifications from macros: RESPOND PREFIX=notify")
+    reset_world()
+    log = []
+    fakes = {p: FakeService(log, p) for p in ("default", "high")}
+    server, c = make({}, {f"macro_{p}": [("ntfy", f, False)]
+                          for p, f in fakes.items()})
+    c.rows = {k: ("none", v[1]) for k, v in c.rows.items()}
+    h = server.handlers["server:gcode_response"]
+    h("echo: something else")
+    h("notify Print ejection complete || Ejected a||b.gcode")
+    h("notify Print ejection failed || Plate occupied || HIGH")
+    h("notify  || no title")
+    h("notify Only a title")
+    await asyncio.sleep(0.4)
+    got = [(e["channel"], e["title"], e["body"]) for e in log]
+    check("title, message (with || inside), optional priority",
+          got == [("default", "📣 U1 Print ejection complete",
+                   "Ejected a||b.gcode"),
+                  ("high", "📣 U1 Print ejection failed", "Plate occupied"),
+                  ("default", "📣 U1 Only a title", "📣 U1 Only a title")],
+          got)
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -987,7 +1011,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_driver_hot,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

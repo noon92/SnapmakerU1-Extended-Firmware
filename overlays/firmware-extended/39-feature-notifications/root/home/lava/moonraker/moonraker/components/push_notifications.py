@@ -94,6 +94,7 @@ ROW_IDS = (
     "started", "layer_started", "first_layer", "progress_25", "progress_50", "progress_75",
     "paused", "resumed", "object_complete", "complete", "cancelled",
     "calibration",
+    "macro_min", "macro_low", "macro_default", "macro_high", "macro_max",
     "error", "warning", "shutdown", "power_loss", "driver_hot",
     "filament_short", "filament_low", "spool_switch",
 )
@@ -110,6 +111,7 @@ TITLES = {
     "complete": "✅ {name} complete",
     "cancelled": "🚫 {name} cancelled",
     "calibration": "📐 {name} {what} complete",
+    "macro": "📣 {name} {title}",
     "calibration_failed": "📐 {name} {what} failed",
     "intervention": "🖐️ {name} user intervention needed",
     "error": "⚠️ {name} Error: {kind}",
@@ -155,6 +157,9 @@ PAUSE_SNAPSHOT_DELAY = 3.
 # error is held this long and dropped if the refill happens (the "Switched
 # to backup spool" notification says it instead)
 REFILL_WAIT = 25.
+MACRO_PREFIX = "notify "
+MACRO_SEP = " || "
+MACRO_LEVELS = ("min", "low", "default", "high", "max")
 RUNOUT_EXCEPTION_ID = 523
 # Before each attempt, wait this long at most for the printer to have a
 # network (Wi-Fi is often not up yet right after boot). Waiting doesn't
@@ -607,6 +612,10 @@ class PushNotifications:
         self.server.register_event_handler(
             "server:klippy_ready", self._on_klippy_ready)
         self.server.register_remote_method(REMOTE_METHOD, self._on_remote)
+        # RESPOND PREFIX=notify MSG="title || message || priority"
+        self.macro_priority: str = config.get("macro_priority", "default")
+        self.server.register_event_handler(
+            "server:gcode_response", self._on_gcode_response)
         logging.info("[push_notifications] enabled: %s", ", ".join(
             f"{rid} ({'+'.join(d.channel for d in dests)})"
             for rid, (_, dests) in self.rows.items()) or "none")
@@ -1318,6 +1327,31 @@ class PushNotifications:
     # ---- exceptions ----------------------------------------------------
 
     # Event handlers must return quickly; do the waiting in a task.
+    def _on_gcode_response(self, response: str) -> None:
+        """Notifications from G-code and macros: a console line
+        "notify <title> || <message> || <priority>" (RESPOND
+        PREFIX=notify MSG=...). The title is everything before the first
+        " || ", the priority the last field if it is one of min..max, the
+        message everything in between. On printers without this component
+        the line is only console output."""
+        for line in str(response or "").splitlines():
+            if not line.startswith(MACRO_PREFIX):
+                continue
+            parts = line[len(MACRO_PREFIX):].split(MACRO_SEP)
+            priority = self.macro_priority
+            if len(parts) > 1 and parts[-1].strip().lower() in MACRO_LEVELS:
+                priority = parts.pop().strip().lower()
+            title = parts[0].strip()
+            message = MACRO_SEP.join(parts[1:]).strip()
+            rid = f"macro_{priority}"
+            if not title or rid not in self.rows:
+                if title:
+                    self._skip("macro", f"{priority} notifications are off")
+                continue
+            self._spawn(self._send(
+                rid, self._title("macro", title=title), message,
+                filename=self._job_filename if self._job_active else ""))
+
     def _track_calibration(self) -> None:
         """Manual calibrations (touchscreen: bed levelling, XYZ offset,
         flow, input shaper), one row: "<which> complete" when its machine

@@ -16,7 +16,7 @@ server), and/or to a webhook for home automation.
 [Choosing a service](#choosing-a-service) ([Gotify](#gotify),
 [Telegram](#telegram), [Webhook](#webhook), [Discord](#discord),
 [Email](#email)) · [Requirements](#requirements) · [Setup](#setup) ·
-[Self-hosting a push server](#self-hosting-a-push-server)
+[Self-hosting a push server](#self-hosting-a-push-server) · [Notifications from macros](#notifications-from-macros-and-g-code)
 ([ntfy](#ntfy-server), [Gotify](#gotify-server)) · [Security](#security) ·
 [Configuration file](#configuration-file) · [Troubleshooting](#troubleshooting)
 
@@ -32,6 +32,7 @@ server), and/or to a webhook for home automation.
 | ✅ Print complete | Camera | Includes print time. When printing by object: once per object as each one finishes and the next begins ("📦 object complete", with which object, e.g. "Object 2 of 3: Assembly", and time left; the last object's is the Print complete notification itself), or once per print job |
 | 🚫 Print cancelled | Camera | |
 | 📐 Manual calibrations | Camera | Calibrations started from the touchscreen (bed levelling, XYZ offset, flow, input shaper): "📐 … Bed levelling complete" when one finishes (or hands over to the next queued one), "📐 … failed" when the printer drops into its abnormal state instead, and "🖐️ … user intervention needed" when one reaches a step that waits for you (brush the nozzle of Toolhead N; the screen waiting for a tap for more than 15 s). Not for the bed mesh inside a print job's start routine |
+| 📣 From macros and G-code | Camera (off by default) | Sent by any macro or G-code line: `RESPOND PREFIX=notify MSG="<title> \|\| <message> \|\| <priority>"` (see [Notifications from macros](#notifications-from-macros-and-g-code)) |
 | ⚠️ Error | Camera | Faults that pause or stop a print, e.g. filament runout or a dirty bed |
 | ⚠️ Warning | Camera | Faults that don't stop a print, e.g. a toolhead contact warning |
 | 🛑 Klipper shutdown | Camera | Heater, thermistor and MCU faults, emergency stop |
@@ -269,6 +270,29 @@ itself is the heading of the email. Faults join the print's conversation
 while it prints and up to 2 minutes after it ends, and a power loss joins
 the print it interrupted; other emails (e.g. an idle warning) have the
 notification as their subject.
+
+## Notifications from macros and G-code
+
+Any Klipper macro or G-code line (a farm loop, an ejection macro, the
+slicer's start or end G-code) can send a notification with Klipper's
+`RESPOND` command and the prefix `notify`:
+
+```
+RESPOND PREFIX=notify MSG="Print ejection complete || Ejected {printer.print_stats.filename}"
+RESPOND PREFIX=notify MSG="Print ejection failed || Plate still occupied, queue paused || max"
+```
+
+- Fields are separated by ` || ` (space, two pipes, space): the title (before
+  the first separator), the message, and optionally a priority (`min`, `low`,
+  `default`, `high` or `max`) as the last field. Without one, the row's
+  **Default** priority is used. Whether a camera picture is attached is the
+  row's image checkbox, not up to the macro.
+- Keep file names in the message, not the title. Don't use `;` anywhere:
+  Klipper ends the line there.
+- In macros, Jinja template variables work (`{printer.print_stats.filename}`);
+  in the slicer's custom G-code, its placeholders (`{input_filename_base}`).
+- On a printer without push notifications, or with them off, the line is only
+  console output: nothing fails.
 
 ## Requirements
 

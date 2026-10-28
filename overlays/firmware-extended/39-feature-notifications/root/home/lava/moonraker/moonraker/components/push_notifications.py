@@ -2344,6 +2344,12 @@ class PushNotifications:
             exact=not ptc.get("replenish_ignore_color"), backups=[])
         unknown_backup = False
         total = max(0., remaining)
+
+        def colour_of(src: Dict[str, Any], c: int) -> str:
+            v = list(src.get("filament_color_rgba") or [])
+            return str(v[c]).strip().lstrip("#").lower()[:6] \
+                if c < len(v) else ""
+        own_colour = colour_of(self._job_ptc or ptc, ch)
         for c in self._backups(ptc, ch, self._job_ptc or None):
             b_sid = ids[c] if c < len(ids) else 0
             b = await self._spool(b_sid)
@@ -2362,7 +2368,7 @@ class PushNotifications:
             it["backups"].append(dict(
                 ch=c, sid=b_sid, name=self._spool_name(b), rem=b_rem,
                 full=self._full_weight(b), colour=self._spool_colour(b, c),
-                own=own))
+                own=own, exact=colour_of(ptc, c) == own_colour))
         it["total"] = total
         it["together"] = self._status_of(total, need)
         it["unknown_backup"] = unknown_backup
@@ -2425,7 +2431,8 @@ class PushNotifications:
             row["refills"] = [dict(
                 toolhead=self._toolhead(b["ch"]), remaining=b["rem"],
                 full=b["full"], colour=b["colour"], name=b["name"],
-                status=it["together"], unknown=b["rem"] <= 0)
+                status=it["together"], unknown=b["rem"] <= 0,
+                match="Exact match" if b.get("exact") else "Inexact match")
                 for b in it["backups"]]
         elif it["refill_on"]:
             row["note"] = ["Refill is on.",

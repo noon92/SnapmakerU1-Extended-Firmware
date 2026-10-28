@@ -250,7 +250,7 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
     """Draw the rows and save a JPEG at `path`. Each row:
       toolhead, word, status, needs (str or ""), remaining, full, colour,
       name, and optionally refills = [{toolhead, remaining, full, colour,
-      name, status}, ...] (in the order the printer uses them) or
+      name, status, match ("Exact match" / "Inexact match")}, ...] (in the order the printer uses them) or
       note = [lines].
     Every spool is drawn as the same stack: toolhead above, amount left,
     what it needs (the toolhead's own spool only) and the filament's name
@@ -273,6 +273,9 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
             y += 27
         _text(d, (cx, y), _fit(d, sp.get("name") or "", font(False, 16),
                                COLUMN - 20), False, 16, GREY, center=True)
+        if sp.get("match"):
+            # A refill spool: the same colour as the toolhead's, or not
+            _text(d, (cx, y + 22), sp["match"], False, 16, GREY, center=True)
 
     def draw(sp: Dict[str, Any], cx: float, y: int) -> None:
         nonlocal bg

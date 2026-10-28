@@ -153,6 +153,9 @@ class Server:
         self.remote[name] = fn
 
     def lookup_component(self, name, default=None):
+        extra = getattr(self, "extra_components", {})
+        if name in extra:
+            return extra[name]
         return {"klippy_apis": Klippy(), "file_manager": FileManager(),
                 "http_client": Http()}.get(name, default)
 
@@ -840,6 +843,49 @@ async def test_macro_notify():
           got)
 
 
+async def test_queue_line():
+    print("Job queue: prints remaining, with total time")
+    reset_world()
+
+    class Job:
+        def __init__(self, f):
+            self.f = f
+
+        def __str__(self):
+            return self.f
+
+    class Queue:
+        queue_state = "starting"
+        queued_jobs = {}
+    q = Queue()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({}, {"started": [("ntfy", ntfy, False)]})
+    server.extra_components = {"job_queue": q}
+    # The queue is starting Benchy and hasn't taken it off its list yet
+    q.queued_jobs = {"1": Job("Benchy.gcode"), "2": Job("A.gcode"),
+                     "3": Job("B.gcode")}
+    check("at start: includes the print that just started",
+          c._queue_line("Benchy.gcode", starting=True)
+          == "3 prints remaining in queue (total 3h 00m)",
+          c._queue_line("Benchy.gcode", starting=True))
+    q.queue_state, q.queued_jobs = "ready", {"2": Job("A.gcode"),
+                                             "3": Job("B.gcode")}
+    check("at start, after the queue took it off: the same",
+          c._queue_line("Benchy.gcode", starting=True)
+          == "3 prints remaining in queue (total 3h 00m)")
+    check("at the end: what is still queued",
+          c._queue_line("Benchy.gcode", starting=False)
+          == "2 prints remaining in queue (total 2h 00m)")
+    q.queued_jobs = {}
+    check("empty queue: nothing",
+          c._queue_line("Benchy.gcode", starting=True) == ""
+          and c._queue_line("Benchy.gcode", starting=False) == "")
+    server.extra_components = {}
+    check("no job queue component: nothing",
+          c._queue_line("Benchy.gcode", starting=True) == "")
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -1011,7 +1057,8 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_driver_hot,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line,
+              test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):
         try:

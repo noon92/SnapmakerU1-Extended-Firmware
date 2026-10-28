@@ -1160,7 +1160,8 @@ class PushNotifications:
                 self._spawn(self._send(
                     "started", self._title("started"),
                     self._lines(shown(filename),
-                                self._slicer_estimate(filename)),
+                                self._slicer_estimate(filename),
+                                self._queue_line(filename, starting=True)),
                     filename=filename))
             # After the started notification has taken its place in the
             # queues, so filament warnings always arrive after it
@@ -1295,8 +1296,11 @@ class PushNotifications:
         ex = self._live_fault(ps)
         if event == "complete":
             rid, title = "complete", self._title("complete")
-            body = f"{shown(filename)}\nPrint time: " \
-                f"{format_duration(ps.get('print_duration', 0))}"
+            body = self._lines(
+                shown(filename),
+                "Print time: "
+                f"{format_duration(ps.get('print_duration', 0))}",
+                self._queue_line(filename, starting=False))
         elif ex is not None and fault_reported:
             rid, title = "cancelled", self._title("cancelled")
             body = f"{shown(filename)}\nAfter: {describe(ex)}"
@@ -1323,6 +1327,36 @@ class PushNotifications:
             else None
         await self._send(rid, title, body, snapshot=snapshot,
                          snapshot_ready=True)
+
+    # ---- job queue -----------------------------------------------------
+
+    def _queue_line(self, filename: str, starting: bool) -> str:
+        """Moonraker's job queue, if it has jobs: "5 prints remaining in
+        queue (total 9h 12m)". At print start the count and the time
+        include the print that just started; when a print ends they are
+        what is still queued. Nothing when the queue is empty."""
+        try:
+            jq = self.server.lookup_component("job_queue", None)
+        except Exception:
+            jq = None
+        if jq is None:
+            return ""
+        files = [str(j) for j in list(getattr(jq, "queued_jobs", {})
+                                      .values())]
+        state = getattr(jq, "queue_state", "")
+        # The queue starts its next job before taking it off the list
+        if starting and files and state in ("loading", "starting") and \
+                files[0] == filename:
+            files = files[1:]
+        if not files:
+            return ""
+        if starting:
+            files = [filename] + files
+        total = sum(self._estimated_time(f) for f in files)
+        n = len(files)
+        line = f"{n} print{'s' if n != 1 else ''} remaining in queue"
+        return line + (f" (total {format_duration(total)})" if total > 0
+                       else "")
 
     # ---- exceptions ----------------------------------------------------
 

@@ -13,6 +13,7 @@
 # Exits non-zero if any check fails.
 
 import asyncio
+import logging
 import copy
 import email
 import importlib.util
@@ -80,6 +81,8 @@ from moonraker.common import JobEvent  # noqa: E402
 import moonraker.components.push_notifications as pn  # noqa: E402
 
 pn.SEND_RETRY_DELAYS = (0.2, 0.2, 0.2)
+pn.CONSOLE_GROUP = 0.05
+CONSOLE = []
 pn.PAUSE_SNAPSHOT_DELAY = 0.1
 pn.FILAMENT_POLL = 0.2
 pn.SEND_GAP = {}       # tested on its own in test_send_gap
@@ -152,6 +155,10 @@ class Server:
     def register_event_handler(self, name, fn):
         self.handlers[name] = fn
 
+    def send_event(self, name, *args):
+        if name == "server:gcode_response":
+            CONSOLE.append(args[0])
+
     def register_remote_method(self, name, fn):
         self.remote[name] = fn
 
@@ -209,8 +216,9 @@ class FakeService:
     """Apprise stand-in: records what was sent, fails the first `fail`
     attempts, takes `delay` seconds per attempt."""
 
-    def __init__(self, log, channel, fail=0, delay=0.0):
+    def __init__(self, log, channel, fail=0, delay=0.0, why=""):
         self.log, self.channel, self.fail, self.delay = log, channel, fail, delay
+        self.why = why      # what Apprise would log on a failure
         self.srv = FakeServer()
 
     def __iter__(self):
@@ -220,6 +228,12 @@ class FakeService:
         await asyncio.sleep(self.delay)
         ok = self.fail <= 0
         self.fail -= 1
+        if not ok and self.why:
+            plugin = {"email": "email/base.py", "webhook": "json.py"}.get(
+                self.channel, f"{self.channel}.py")
+            logging.getLogger("apprise").handle(logging.LogRecord(
+                "apprise", logging.DEBUG, f"/x/apprise/plugins/{plugin}", 1,
+                self.why, None, None))
         self.log.append(dict(channel=self.channel, title=title, body=body,
                              attach=attach, ok=ok, t=time.monotonic(),
                              headers=dict(self.srv.headers)))
@@ -1027,6 +1041,42 @@ async def test_backup_order():
           == [])
 
 
+async def test_console():
+    print("Console: what was sent where, and failed attempts")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    email = FakeService(log, "email", fail=9, why="Socket Exception: "
+                        "HTTPSConnectionPool: Read timed out.")
+    hook = FakeService(log, "webhook", fail=9, why="Socket Exception: "
+                       "Read timed out. (read timeout=10)")
+    server, c = make({}, {"complete": [("ntfy", ntfy, False),
+                                       ("email", email, True),
+                                       ("webhook", hook, False)]})
+    CONSOLE.clear()
+    await c._send("complete", "✅ U1 complete", "Benchy")
+    await asyncio.sleep(0.3)
+    check("sent where it went; each failed attempt, same causes joined; "
+          "then the final failure", CONSOLE == [
+              '!! Failed to send notification "✅ U1 complete" to email, '
+              'webhook (timed out), attempt 1/4, will retry in 0.2 seconds',
+              '!! Failed to send notification "✅ U1 complete" to email, '
+              'webhook (timed out), attempt 2/4, will retry in 0.2 seconds',
+              '!! Failed to send notification "✅ U1 complete" to email, '
+              'webhook (timed out), attempt 3/4, will retry in 0.2 seconds',
+              'Sent notification "✅ U1 complete" to ntfy, with picture',
+              '!! Failed to send notification "✅ U1 complete" to email, '
+              'webhook (timed out), attempt 4/4'], CONSOLE)
+    check("short causes", [pn.short_cause([m]) for m in (
+        "Failed to send ntfy notification to topic 'u1': Unauthorized, "
+        "error=401.", "Socket Exception: (535, b'5.7.8 Username and "
+        "Password not accepted')", "Socket Exception: [SSL: "
+        "CERTIFICATE_VERIFY_FAILED]", "Socket Exception: Failed to "
+        "resolve 'ntfy.example'", "A Connection error occurred")] == [
+        "401 Unauthorized", "535 login rejected", "SSL error",
+        "server not found", "could not connect"])
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -1198,7 +1248,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber, test_backup_order,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber, test_backup_order, test_console,
               test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):

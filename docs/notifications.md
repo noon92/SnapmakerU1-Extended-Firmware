@@ -583,6 +583,11 @@ section in a separate file in `extended/moonraker/` (see
 
 ## Troubleshooting
 
+- **Console**: Fluidd and Mainsail's console shows each notification as
+  it's sent, e.g. `Sent notification "✅ U1 complete" to ntfy, email, with
+  picture`, and each failed attempt with a few words on why, e.g. `!! Failed
+  to send notification "✅ U1 complete" to email (timed out), attempt 2/4,
+  will retry in 10 seconds`.
 - **Nothing arrives**: use **Send Test** first. Then check
   `/home/lava/printer_data/logs/moonraker.log` for lines starting with
   `[push_notifications]`.

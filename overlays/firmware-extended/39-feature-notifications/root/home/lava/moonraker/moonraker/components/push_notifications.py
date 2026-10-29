@@ -47,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import html
+import http
 import json
 import logging
 import os
@@ -468,6 +469,100 @@ class Ticket(NamedTuple):
     created: float              # monotonic time the notification happened
 
 
+# Console lines (Fluidd/Mainsail): what was sent, to which services, and
+# each failed attempt with a few words on why. Failed attempts of one
+# notification with the same cause, at the same attempt, within this many
+# seconds are one line.
+CONSOLE_GROUP = 1.
+CHANNEL_NAMES = {"ntfy": "ntfy", "gotify": "Gotify", "pushover": "Pushover",
+                 "telegram": "Telegram", "discord": "Discord",
+                 "email": "email", "webhook": "webhook"}
+CHANNEL_ORDER = list(CHANNEL_NAMES)
+# Which service an Apprise log line is about: the file that logged it
+APPRISE_SOURCES = (("push_notifications_discord", "discord"),
+                   ("email", "email"), ("ntfy", "ntfy"),
+                   ("gotify", "gotify"), ("pushover", "pushover"),
+                   ("telegram", "telegram"), ("discord", "discord"),
+                   ("json", "webhook"))
+SMTP_PHRASES = {421: "server busy", 450: "mailbox busy", 451: "server busy",
+                530: "login required", 534: "login rejected",
+                535: "login rejected", 550: "rejected", 553: "rejected",
+                554: "rejected"}
+
+
+def short_cause(messages: List[str]) -> str:
+    """Why a send failed, in a few words, from what Apprise logged:
+    "401 Unauthorized", "timed out", "SSL error", "535 login rejected"."""
+    text = " | ".join(messages)
+    low = text.lower()
+    m = re.search(r"error=(\d{3})\b", text)
+    if m:
+        code = int(m.group(1))
+        try:
+            return f"{code} {http.HTTPStatus(code).phrase}"
+        except ValueError:
+            return f"HTTP {code}"
+    m = re.search(r"\((\d{3}), b['\"]", text)
+    if m:
+        code = int(m.group(1))
+        return f"{code} {SMTP_PHRASES.get(code, 'rejected by server')}"
+    if "timed out" in low or "timeout" in low:
+        return "timed out"
+    if "ssl" in low or "certificate" in low:
+        return "SSL error"
+    if any(k in low for k in ("name or service not known", "name resolution",
+                              "nodename nor servname", "getaddrinfo",
+                              "no address associated", "failed to resolve")):
+        return "server not found"
+    if "connection refused" in low:
+        return "connection refused"
+    if "connect" in low:
+        return "could not connect"
+    return "failed"
+
+
+class AppriseLog(logging.Handler):
+    """Apprise's messages per service (debug ones too), to say why a send
+    failed. Moonraker's log gets what it got before: Apprise's own logger
+    no longer passes records up, and this passes on those at the level it
+    logged at (debug lines can hold URLs with tokens)."""
+    installed: Optional["AppriseLog"] = None
+
+    def __init__(self, level: int) -> None:
+        super().__init__(logging.DEBUG)
+        self.forward_level = level
+        self.messages: Dict[str, List[str]] = {}
+
+    @classmethod
+    def install(cls) -> "AppriseLog":
+        if cls.installed is None:
+            log = logging.getLogger("apprise")
+            cls.installed = cls(log.getEffectiveLevel())
+            log.addHandler(cls.installed)
+            log.setLevel(logging.DEBUG)
+            log.propagate = False
+        return cls.installed
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= self.forward_level:
+            logging.getLogger().handle(record)
+        path = (record.pathname or "").replace("\\", "/")
+        where = path.rsplit("/apprise/", 1)[-1] if "/apprise/" in path \
+            else os.path.basename(path)
+        for key, channel in APPRISE_SOURCES:
+            if key in where:
+                try:
+                    msgs = self.messages.setdefault(channel, [])
+                    msgs.append(record.getMessage()[:500])
+                    del msgs[:-20]
+                except Exception:
+                    pass
+                return
+
+    def take(self, channel: str) -> List[str]:
+        return self.messages.pop(channel, [])
+
+
 class Destination(NamedTuple):
     channel: str             # "ntfy", "pushover", "email", ... (for logs)
     ap: apprise.Apprise
@@ -494,6 +589,9 @@ def has_network() -> bool:
 
 class PushNotifications:
     def __init__(self, config: ConfigHelper) -> None:
+        self.apprise_log = AppriseLog.install()
+        # Failed attempts waiting CONSOLE_GROUP to be joined into one line
+        self._console_pending: Dict[Tuple[Any, ...], List[str]] = {}
         self.server = config.get_server()
         self.eventloop = self.server.get_event_loop()
         self.name: str = config.get("name", "U1")
@@ -811,10 +909,12 @@ class PushNotifications:
                 path = await self._image(image, filename, snapshot,
                                          snapshot_ready)
             named = self._named_copy(path, title, filename)
+            report: List[Dict[str, Any]] = []
             try:
                 results = await asyncio.gather(*(
-                    self._deliver(rid, d, t, [(title, body, named)])
+                    self._deliver(rid, d, t, [(title, body, named)], report)
                     for d, t in zip(dests, tickets)), return_exceptions=True)
+                self._console_report(report)
             finally:
                 if named is not None and named != path:
                     shutil.rmtree(os.path.dirname(named), ignore_errors=True)
@@ -1002,11 +1102,13 @@ class PushNotifications:
             return self._thumbnail(filename)
         return None
 
-    async def _wait_network(self, rid: str) -> None:
+    async def _wait_network(self, rid: str, title: str = "") -> None:
         if has_network():
             return
         logging.info("[push_notifications] %s: no network, waiting up to "
                      "%ds", rid, NETWORK_WAIT)
+        if title:
+            self._console_join(("wait", title), "")
         deadline = time.monotonic() + NETWORK_WAIT
         while time.monotonic() < deadline:
             await asyncio.sleep(NETWORK_POLL)
@@ -1018,17 +1120,89 @@ class PushNotifications:
 
     async def _deliver(
         self, rid: str, dest: Destination, t: Ticket,
-        msgs: List[Tuple[str, str, Optional[str]]]
+        msgs: List[Tuple[str, str, Optional[str]]],
+        report: Optional[List[Dict[str, Any]]] = None
     ) -> bool:
         """Send one or more messages (title, text, image) to one
         destination, in its channel's turn. Doesn't remove the images
-        (shared by destinations)."""
+        (shared by destinations). Each outcome goes in `report`, for the
+        console."""
         ok = True
-        for title, body, path in msgs:
-            title, body, headers = self._prepare(rid, dest, title, body, path)
+        for shown_title, body, path in msgs:
+            title, body, headers = self._prepare(rid, dest, shown_title,
+                                                 body, path)
+            result: Dict[str, Any] = dict(title=shown_title,
+                                          channel=dest.channel)
             ok = await self._attempts(rid, dest, t, title, body, headers,
-                                      path) and ok
+                                      path, result) and ok
+            if report is not None:
+                report.append(result)
         return ok
+
+    # -- console --
+
+    def _console(self, line: str) -> None:
+        try:
+            self.server.send_event("server:gcode_response", line)
+        except Exception as e:
+            logging.debug("[push_notifications] console: %s", e)
+
+    @staticmethod
+    def _services(channels: List[str]) -> str:
+        seen = sorted(set(channels), key=lambda c: CHANNEL_ORDER.index(c)
+                      if c in CHANNEL_ORDER else len(CHANNEL_ORDER))
+        return ", ".join(CHANNEL_NAMES.get(c, c) for c in seen)
+
+    def _console_join(self, key: Tuple[Any, ...], channel: str) -> None:
+        """A line that others like it (same notification, cause, attempt)
+        may join for CONSOLE_GROUP seconds before it's printed."""
+        first = key not in self._console_pending
+        self._console_pending.setdefault(key, []).append(channel)
+        if first:
+            self._spawn(self._console_flush(key))
+
+    async def _console_flush(self, key: Tuple[Any, ...]) -> None:
+        await asyncio.sleep(CONSOLE_GROUP)
+        channels = self._console_pending.pop(key, [])
+        if key[0] == "wait":
+            self._console(f"Waiting up to {NETWORK_WAIT / 60:.0f} minutes "
+                          f"for network to return, to send notification "
+                          f"\"{key[1]}\"")
+            return
+        _kind, title, cause, attempt, attempts, retry = key
+        self._console(f"!! Failed to send notification \"{title}\" to "
+                      f"{self._services(channels)} ({cause}), attempt "
+                      f"{attempt}/{attempts}, will retry in {retry} seconds")
+
+    def _console_report(self, report: List[Dict[str, Any]]) -> None:
+        """After a notification's sends: what went where, then what
+        failed for good (one line per cause)."""
+        titles: List[str] = []
+        for r in report:
+            if r["title"] not in titles:
+                titles.append(r["title"])
+        for title in titles:
+            mine = [r for r in report if r["title"] == title]
+            sent = [r for r in mine if r.get("ok")]
+            if sent:
+                pic = [r["channel"] for r in sent if r.get("picture")]
+                text = [r["channel"] for r in sent if not r.get("picture")]
+                parts = []
+                if pic:
+                    parts.append(f"{self._services(pic)}, with picture")
+                if text:
+                    parts.append(self._services(text))
+                self._console(f"Sent notification \"{title}\" to "
+                              + ", and to ".join(parts))
+            causes: Dict[Tuple[str, int], List[str]] = {}
+            for r in mine:
+                if not r.get("ok") and r.get("attempts"):
+                    causes.setdefault((r.get("cause") or "failed",
+                                       r["attempts"]), []).append(r["channel"])
+            for (cause, n), channels in causes.items():
+                self._console(f"!! Failed to send notification \"{title}\" "
+                              f"to {self._services(channels)} ({cause}), "
+                              f"attempt {n}/{n}")
 
     def _expired(self, rid: str, t: Ticket) -> bool:
         return rid in EXPIRING_ROWS and \
@@ -1036,7 +1210,8 @@ class PushNotifications:
 
     async def _attempts(
         self, rid: str, dest: Destination, t: Ticket, title: str, body: str,
-        headers: Dict[str, str], path: Optional[str]
+        headers: Dict[str, str], path: Optional[str],
+        result: Optional[Dict[str, Any]] = None
     ) -> bool:
         """One message with retries. The channel is held only during an
         attempt: while this one waits to retry (or for the network), the
@@ -1049,10 +1224,13 @@ class PushNotifications:
         ok = False
         attempts = 1 + len(SEND_RETRY_DELAYS)
         kind = NOTIFY_TYPES.get(rid, "info")
+        result = {} if result is None else result
+        shown_title = result.get("title", title)
+        pictured = False
         for attempt in range(attempts):
             if attempt:
                 await asyncio.sleep(SEND_RETRY_DELAYS[attempt - 1])
-            await self._wait_network(what)
+            await self._wait_network(what, shown_title)
             await t.gate.acquire(t.ticket)
             try:
                 if self._expired(rid, t):
@@ -1074,10 +1252,13 @@ class PushNotifications:
                 # Each attempt waits for the server's answer before the next
                 # is scheduled. The last one is text only, in case the image
                 # is what the server rejects (e.g. no attachments allowed).
+                self.apprise_log.take(dest.channel)
                 if attempt < attempts - 1 or path is None:
+                    pictured = path is not None
                     ok = await ap.async_notify(
                         body=body, title=title, attach=path, notify_type=kind)
                 else:
+                    pictured = False
                     if email_html is not None and email_html.is_page(body):
                         last = email_html.without_image(body)
                     else:
@@ -1089,7 +1270,12 @@ class PushNotifications:
                 await t.gate.release(t.ticket)
             if ok:
                 break
+            cause = short_cause(self.apprise_log.take(dest.channel))
+            result.update(cause=cause, attempts=attempts)
             if attempt < attempts - 1:
+                self._console_join(
+                    ("fail", shown_title, cause, attempt + 1, attempts,
+                     SEND_RETRY_DELAYS[attempt]), dest.channel)
                 logging.warning(
                     "[push_notifications] %s: attempt %d failed, "
                     "retrying in %ds%s", what, attempt + 1,
@@ -1097,6 +1283,7 @@ class PushNotifications:
                     " without the image"
                     if attempt == attempts - 2 and path is not None
                     else "")
+        result.update(ok=bool(ok), picture=bool(ok) and pictured)
         if ok:
             logging.info("[push_notifications] %s: sent", what)
         else:
@@ -2808,10 +2995,12 @@ class PushNotifications:
                         path = paths[key]
                     out.append((t, b, path))
                 per_dest.append(out)
+            report: List[Dict[str, Any]] = []
             results = await asyncio.gather(*(
-                self._deliver(rid, d, t, msgs)
+                self._deliver(rid, d, t, msgs, report)
                 for d, t, msgs in zip(dests, tickets, per_dest)),
                 return_exceptions=True)
+            self._console_report(report)
         finally:
             for t in tickets:
                 await t.gate.done(t.ticket)

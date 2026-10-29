@@ -943,7 +943,21 @@
             }
         }
 
+        let formCommandRunning = false;
+
         async function runFormCommand(id, command) {
+            // One at a time: a second click while the confirm dialog is
+            // open (or the command runs) would start a second save
+            if (formCommandRunning) return;
+            formCommandRunning = true;
+            try {
+                await runFormCommandNow(id, command);
+            } finally {
+                formCommandRunning = false;
+            }
+        }
+
+        async function runFormCommandNow(id, command) {
             const setting = settingsData[id];
             const cmd = setting.form.commands[command];
             let payload;

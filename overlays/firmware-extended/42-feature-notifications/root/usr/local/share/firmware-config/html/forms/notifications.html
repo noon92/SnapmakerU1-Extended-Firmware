@@ -332,7 +332,7 @@
             </div>
         </div>
         <div class="nt-hint" id="nt-filament-off" style="margin:-8px 0 16px;font-size:12px;color:var(--muted)">
-            🧵 <b>Spoolman</b> notifications (not enough filament, running low, switched to backup spool) need the Spoolman integration (Settings &gt; Snapmaker Components &gt; Spoolman Integration).
+            🧵 <b>Spoolman</b> notifications (not enough filament, running low) need the Spoolman integration (Settings &gt; Snapmaker Components &gt; Spoolman Integration).
         </div>
     </div>
 </div>
@@ -340,7 +340,7 @@
 <script>
 (function () {
     const PRIORITY_LABELS = { min: 'Min', low: 'Low', default: 'Default', high: 'High', max: 'Max' };
-    const GROUP_LABELS = { chamber: 'Chamber temperature', fault: 'Faults', spoolman: 'Spoolman' };
+    const GROUP_LABELS = { chamber: 'Chamber temperature', fault: 'Faults', spoolman: 'Spoolman', refill: 'Backup spools' };
     let state = null;
     let localWarned = false;  // the local IP popup shows once per opening
     const LOCAL_WARNING = 'With the local IP, the Web UI and Live Camera buttons only work when your phone ' +

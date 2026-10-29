@@ -13,4 +13,4 @@ set -eo pipefail
 # The spool pictures (push_notifications_images.py) are drawn with Pillow.
 # Apprise comes from 12-patch-moonraker.
 echo ">> Installing Pillow for the Push Notifications spool pictures"
-cache_pip.sh "$ROOTFS_DIR" Pillow
+cache_pip.sh "$ROOTFS_DIR" "Pillow==11.3.0"

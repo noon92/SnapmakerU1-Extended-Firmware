@@ -1,4 +1,4 @@
-# 39-feature-notifications: Push Notifications
+# 42-feature-notifications: Push Notifications
 
 Print, progress, fault and filament notifications with images, sent through
 [Apprise](https://github.com/caronc/apprise) to ntfy, Gotify, Pushover, Telegram,
@@ -34,7 +34,7 @@ User documentation: [docs/notifications.md](../../../docs/notifications.md).
 ## Tests
 
 ```sh
-python3 overlays/firmware-extended/39-feature-notifications/test/notifications_test.py
+python3 overlays/firmware-extended/42-feature-notifications/test/notifications_test.py
 ```
 
 Needs Python 3.9+, `apprise` and `Pillow`; no printer or network. The

@@ -42,9 +42,9 @@ server), and/or to a webhook for home automation.
 | ⚡ Power loss recovery | Camera | Sent after boot when an interrupted print can be resumed, with a photo of the part (the camera gets up to 45 seconds to start) |
 | 🌡️ Driver running hot | Camera | When the X or Y stepper driver reaches the set temperature (default 105 °C; the TMC2240 reports its own temperature, and warns itself at 120 °C). Once per print job, and again after a pause, so a print job paused for the heat and resumed can warn a second time, while a driver hovering at the limit doesn't send one after another. Shows both drivers' temperatures |
 | ▶️ Resumed after power loss | Camera | Sent instead of *Print started* when a recovered print continues (uses the *Resumed* settings), with time left and ETA |
-| 🧵 Not enough filament | Spools | Spoolman: when a toolhead the print uses has less filament than the rest of the print needs (red), or only just enough, within 20 g or 5% (orange: "may be insufficient"). Checked at print start, as one notification for all toolheads at risk, and again during the print when a toolhead gets worse. If refill is on, says which spools the printer can refill from, in the order it would use them (exact colour match first, in toolhead order; with "ignore colour", then the nearest colour; each one refilling the next as it runs out), shown as a chain of arrows in the picture, how much each has, whether it's an exact match or only a compatible spool, and whether together they're enough, or that no refill spool was found. A loaded spool that Spoolman shows at 0 g or less is reported once, at print start, as "amount of filament left is unknown" (it isn't used for any other check). Nothing is sent when all spools are fine |
+| 🧵 Not enough filament | Spools | Spoolman: when a toolhead the print uses has less filament than the rest of the print needs (red), or only just enough, within 20 g or 5% (orange: "may be insufficient"). Checked at print start, as one notification for all toolheads at risk, and again during the print when a toolhead gets worse. If refill is on, says which spools the printer can refill from, in the order it would use them (exact colour match first, in toolhead order; with "ignore colour", then the nearest colour; each one refilling the next as it runs out), shown as a chain of arrows in the picture, how much each has, and which same-material toolheads the printer will *not* refill from and why (no filament info set, another nozzle, a different vendor or sub-type, or the colour with exact match required), whether it's an exact match or only a compatible spool, and whether together they're enough, or that no refill spool was found. A loaded spool that Spoolman shows at 0 g or less is reported once, at print start, as "amount of filament left is unknown" (it isn't used for any other check). Nothing is sent when all spools are fine |
 | 🧵 Spool running low | Spool | Spoolman: when a spool is down to a set % of a full spool (default 10%) or a set weight (default 50 g), whichever comes first. Sent once per spool, until it is refilled or replaced; time to buy a new one. Spools that run low at the same time (e.g. at print job start) come in one notification. With refill on, it shows the spool the printer would refill from (or that there is none) |
-| 🔄 Switched to backup spool | Spools | Spoolman: when the printer refills a filament from another toolhead mid-print, with the new spool's remaining weight |
+| 🔄 Switched to backup spool | Spools | When the printer refills a filament from another toolhead mid-print (its own refill, with or without Spoolman). The runout that caused it isn't reported as an error when this row is on: the printer refills by itself within seconds. With Spoolman: the spools' names and remaining weights |
 
 Each notification can be sent by push, by email, or both, with its own
 priority (push) and image setting. For example: progress by push only, and
@@ -503,9 +503,10 @@ notifications are text only (see [Gotify](#gotify)).
   logs or backs up that file. Anyone who can reach Firmware Config can
   still change where notifications go, so enable **Web Authentication**
   under **Settings > Remote Access** if your network isn't trusted.
-- A saved token is only reused for the service and server it was entered
-  for: switching the push service, or the ntfy server, asks for the new
-  one, so a token is never sent to another host.
+- A saved token or password is only reused for the service and server it
+  was entered for: switching the push service, the ntfy server, or the
+  email server, port, security or username asks for it again, so a secret
+  is never sent to another host.
 
 ## Configuration File
 

@@ -227,7 +227,11 @@ NAME_CAP_MIN = 8
 PTC_FIELDS = ["extruder_map_table", "filament_spool_id", "extruders_used",
               "auto_replenish_filament", "replenish_ignore_color",
               "filament_exist", "filament_vendor", "filament_type",
-              "filament_sub_type", "filament_color_rgba"]
+              "filament_sub_type", "filament_color_rgba",
+              "filament_color_multi"]
+# The printer refills only from a toolhead with the same nozzle
+EXTRUDERS = ["extruder", "extruder1", "extruder2", "extruder3"]
+NOZZLE_FIELDS = ["nozzle_diameter", "nozzle_volume_type"]
 # A job that starts this far into its file is a power-loss recovery
 RECOVERY_MIN_PROGRESS = 0.01
 # ...and either kept its print time, or is this far in (a small file's
@@ -419,8 +423,11 @@ class ChannelGate:
     happens: (urgency, sequence). A send attempt waits until its ticket is
     the first one still pending and nothing else is sending, so
     notifications arrive in the order they happened (resumed never before
-    paused), except that faults go ahead of status notifications. A send
-    that is waiting to retry lets the others through in the meantime."""
+    paused), except that faults go ahead of status notifications. A ticket
+    is held until its notification is sent or given up, so one that is
+    waiting to retry holds the channel's later notifications back (they
+    would arrive out of order otherwise); faults, with a lower ticket, go
+    ahead of it. Services never wait on each other."""
 
     def __init__(self) -> None:
         self._seq = 0
@@ -722,7 +729,7 @@ class PushNotifications:
         self._status: Dict[str, Dict[str, Any]] = {
             "print_stats": {}, "virtual_sdcard": {}, "print_task_config": {},
             "exclude_object": {}, "machine_state_manager": {},
-            **{d: {} for d in DRIVERS}}
+            **{d: {} for d in DRIVERS}, **{e: {} for e in EXTRUDERS}}
         # Chamber: the printer's heater_generic objects, whether it has
         # Snapmaker's chamber sensor / purifier / a DragonBreath (found at
         # klippy_ready), and this job's chamber state (see _track_chamber)
@@ -911,9 +918,9 @@ class PushNotifications:
             named = self._named_copy(path, title, filename)
             report: List[Dict[str, Any]] = []
             try:
-                results = await asyncio.gather(*(
+                results = self._outcomes(rid, dests, await asyncio.gather(*(
                     self._deliver(rid, d, t, [(title, body, named)], report)
-                    for d, t in zip(dests, tickets)), return_exceptions=True)
+                    for d, t in zip(dests, tickets)), return_exceptions=True))
                 self._console_report(report)
             finally:
                 if named is not None and named != path:
@@ -924,6 +931,22 @@ class PushNotifications:
             for t in tickets:
                 await t.gate.done(t.ticket)
         return all(results)
+
+    @staticmethod
+    def _outcomes(rid: str, dests: List[Destination],
+                  results: List[Any]) -> List[bool]:
+        """gather(return_exceptions=True) hands back exception objects,
+        which are truthy: a delivery that crashed is logged and counts as
+        failed, not sent."""
+        out = []
+        for d, r in zip(dests, results):
+            if isinstance(r, BaseException):
+                logging.error("[push_notifications] %s (%s): send crashed: "
+                              "%r", rid, d.channel, r, exc_info=r)
+                out.append(False)
+            else:
+                out.append(bool(r))
+        return out
 
     def _image_name(self, title: str, filename: str, ext: str) -> str:
         """File name for a notification's picture, so saved or exported
@@ -1133,8 +1156,18 @@ class PushNotifications:
                                                  body, path)
             result: Dict[str, Any] = dict(title=shown_title,
                                           channel=dest.channel)
-            ok = await self._attempts(rid, dest, t, title, body, headers,
-                                      path, result) and ok
+            try:
+                ok = await self._attempts(rid, dest, t, title, body, headers,
+                                          path, result) and ok
+            except Exception as e:
+                # Reported on the console as a failure too (the caller
+                # logs it with its traceback)
+                result.update(ok=False, cause=f"error: {type(e).__name__}",
+                              attempts=result.get("attempts")
+                              or 1 + len(SEND_RETRY_DELAYS))
+                if report is not None:
+                    report.append(result)
+                raise
             if report is not None:
                 report.append(result)
         return ok
@@ -1213,9 +1246,10 @@ class PushNotifications:
         headers: Dict[str, str], path: Optional[str],
         result: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """One message with retries. The channel is held only during an
-        attempt: while this one waits to retry (or for the network), the
-        channel's other notifications can go."""
+        """One message with retries. The channel is busy only during an
+        attempt, but this notification's ticket keeps the channel's later
+        (non-fault) notifications waiting until it is sent or given up,
+        so they arrive in order; a fault can go ahead between attempts."""
         what = f"{rid} ({dest.channel})"
         ap = dest.ap
         body = body.strip() or title
@@ -1365,7 +1399,8 @@ class PushNotifications:
             gen = self._job_gen
             progress = await self._start_job(filename)
             if gen != self._job_gen:
-                return      # the job ended while it was being seeded
+                self._job_active = False    # it ended while being seeded
+                return
             # Snapmaker resumes a power-loss print as a new job, part-way
             # into the file with its print time kept. A small file's start
             # G-code alone is past 1 %, so the print time decides there.
@@ -1917,9 +1952,12 @@ class PushNotifications:
                       "virtual_sdcard": ["progress", "file_position"],
                       "exclude_object": ["objects", "current_object",
                                          "excluded_objects"],
-                      **{d: ["temperature"] for d in DRIVERS}},
-                     **({"print_task_config": PTC_FIELDS}
-                        if self._spoolman_active() else {}),
+                      **{d: ["temperature"] for d in DRIVERS},
+                      # Always: the runout hold and the backup-spool switch
+                      # read the toolhead map and the refill settings from
+                      # it, with or without Spoolman
+                      "print_task_config": PTC_FIELDS,
+                      **{e: NOZZLE_FIELDS for e in EXTRUDERS}},
                      **({"machine_state_manager": ["main_state",
                                                    "action_code"]}
                         if "calibration" in self.rows
@@ -2192,8 +2230,6 @@ class PushNotifications:
         self._spool_start = {}
         self._spool_now = {}
         self._tool_spools = {}
-        if not self._spoolman_active():
-            return
         self._filament_job += 1
         self._spawn(self._filament_watch(
             self._filament_job, filename, progress, check_start))
@@ -2265,11 +2301,24 @@ class PushNotifications:
             return text
         return text[:max(1, cap - 1)].rstrip() + "…"
 
+    @staticmethod
+    def _printer_filament(ptc: Dict[str, Any], ch: int) -> str:
+        """The filament as the printer knows it (no Spoolman): vendor and
+        type, e.g. "Elegoo PLA"."""
+        parts = []
+        for k in ("filament_vendor", "filament_type"):
+            v = list(ptc.get(k) or [])
+            val = str(v[ch]).strip() if ch < len(v) else ""
+            if val and val.upper() != "NONE":
+                parts.append(val)
+        return " ".join(parts)
+
     def _desc(self, ch: int, name: str, sid: int,
               cap: Optional[int] = None) -> str:
-        inner = ", ".join(x for x in (self._cap(name, cap), f"spool #{sid}")
-                          if x)
-        return f"{self._toolhead(ch)} ({inner})"
+        inner = ", ".join(x for x in (self._cap(name, cap),
+                                      f"spool #{sid}" if sid else "") if x)
+        return f"{self._toolhead(ch)} ({inner})" if inner \
+            else self._toolhead(ch)
 
     def _needed_grams(self, filename: str) -> Dict[int, float]:
         """Slicer filament weight per slicer filament (T0..)."""
@@ -2287,36 +2336,78 @@ class PushNotifications:
         return {i: float(w) for i, w in enumerate(weights)
                 if isinstance(w, (int, float)) and w > 0}
 
+    def _nozzle(self, ch: int) -> Tuple[Any, Any]:
+        st = self._status.get(EXTRUDERS[ch] if ch < len(EXTRUDERS)
+                              else "") or {}
+        return st.get("nozzle_diameter"), st.get("nozzle_volume_type")
+
     @staticmethod
-    def _backups(ptc: Dict[str, Any], ch: int,
+    def _colour_multi(src: Dict[str, Any], c: int) -> Any:
+        """The printer compares colours on filament_color_multi (the whole
+        set, for multi-colour filaments); older firmware has only
+        filament_color_rgba."""
+        multi = list(src.get("filament_color_multi") or [])
+        if c < len(multi) and isinstance(multi[c], dict) and multi[c]:
+            return multi[c]
+        rgba = list(src.get("filament_color_rgba") or [])
+        return {"colors": [str(rgba[c])[:6].upper()]} if c < len(rgba) \
+            else None
+
+    def _refill_check(self, ptc: Dict[str, Any], ch: int, c: int,
+                      src: Dict[str, Any]) -> Tuple[bool, str]:
+        """Whether the printer may refill `ch` from `c`, as
+        print_task_config.py (cmd_INNER_AUTO_REPLENISH_FILAMENT) decides
+        it, and if not, why, in words for the notification ("" when `c`
+        isn't even the same material, which isn't worth a line)."""
+        def field(d: Dict[str, Any], k: str, i: int) -> str:
+            v = list(d.get(k) or [])
+            return str(v[i]).strip() if i < len(v) else ""
+        exist = list(ptc.get("filament_exist") or [])
+        if c < len(exist) and not exist[c]:
+            return False, ""
+        same_type = field(ptc, "filament_type", c).lower() == \
+            field(src, "filament_type", ch).lower() != ""
+        nd, nv = self._nozzle(ch)
+        cd, cv = self._nozzle(c)
+        if nd is not None and cd is not None and (nd != cd or nv != cv):
+            return False, (f"nozzle {cd} vs {nd}" if nd != cd
+                           else f"{cv or 'other'} nozzle vs {nv or 'other'}"
+                           ) if same_type else ""
+        if field(ptc, "filament_vendor", c).upper() in ("", "NONE"):
+            return False, ("no filament info set on the printer (vendor "
+                           "NONE)" if same_type else "")
+        for k, what in (("filament_vendor", "vendor"),
+                        ("filament_type", "type"),
+                        ("filament_sub_type", "sub-type")):
+            if field(ptc, k, c).lower() != field(src, k, ch).lower():
+                return False, (f"different {what} ({field(ptc, k, c)} vs "
+                               f"{field(src, k, ch)})" if same_type else "")
+        if not ptc.get("replenish_ignore_color") and \
+                self._colour_multi(ptc, c) != self._colour_multi(src, ch):
+            return False, "colour differs (refill needs an exact match)"
+        return True, ""
+
+    def _backups(self, ptc: Dict[str, Any], ch: int,
                  attrs_from: Optional[Dict[str, Any]] = None) -> List[int]:
         """Channels the printer can refill `ch` from, in the order it would
         use them (each one refilled from in turn as the one before runs
         out). `attrs_from` gives `ch`'s own filament (e.g. as it was at
         print start, before it ran out).
 
-        print_task_config.py (cmd_INNER_AUTO_REPLENISH_FILAMENT): vendor,
-        type and sub-type must match. Of those, the first exact colour
-        match in toolhead order wins; with "ignore colour" and no exact
-        match, the nearest colour (Rec. 601 weighted RGB distance). When
-        that spool runs out, the next is chosen the same way from it."""
+        print_task_config.py (cmd_INNER_AUTO_REPLENISH_FILAMENT): same
+        nozzle, a vendor set (not NONE), vendor, type and sub-type equal.
+        Of those, the first exact colour match (filament_color_multi) in
+        toolhead order; else, with "ignore colour", the nearest first
+        colour (Rec. 601 weighted RGB distance). When that spool runs out,
+        the next is chosen the same way from it."""
         if not ptc.get("auto_replenish_filament"):
             return []
-        keys = ["filament_type", "filament_vendor", "filament_sub_type"]
         ignore = bool(ptc.get("replenish_ignore_color"))
-        exist = list(ptc.get("filament_exist") or [])
 
-        def attrs(src: Dict[str, Any], c: int) -> List[str]:
-            out = []
-            for k in keys:
-                v = list(src.get(k) or [])
-                out.append(str(v[c]).strip().lower() if c < len(v) else "")
-            return out
-
-        def colour(src: Dict[str, Any], c: int) -> str:
-            v = list(src.get("filament_color_rgba") or [])
-            return str(v[c]).strip().lstrip("#").lower()[:6] \
-                if c < len(v) else ""
+        def first_colour(src: Dict[str, Any], c: int) -> str:
+            m = self._colour_multi(src, c) or {}
+            cols = list(m.get("colors") or [])
+            return str(cols[0]).upper()[:6] if cols else ""
 
         def distance(a: str, b: str) -> float:
             try:
@@ -2328,26 +2419,42 @@ class PushNotifications:
                     + (0.114 * d[2]) ** 2) ** 0.5
         ids = list(ptc.get("filament_spool_id") or [])
         src = attrs_from or ptc
-        mine = attrs(src, ch)
-        if not mine[0]:
-            return []
+        relaxed = dict(ptc, replenish_ignore_color=True)
         left = [c for c in range(len(ids)) if c != ch
-                and (c >= len(exist) or exist[c]) and attrs(ptc, c) == mine]
+                and self._refill_check(relaxed, ch, c, src)[0]]
         order: List[int] = []
-        cur = colour(src, ch)
+        cur_src, cur = src, ch
         while left:
-            exact = [c for c in left if colour(ptc, c) == cur]
+            exact = [c for c in left if self._colour_multi(ptc, c)
+                     == self._colour_multi(cur_src, cur)]
             if exact:
                 pick = exact[0]
             elif ignore:
+                tc = first_colour(cur_src, cur)
                 pick = min(left, key=lambda c: (
-                    distance(colour(ptc, c), cur), c))
+                    distance(first_colour(ptc, c), tc), c))
             else:
                 break
             order.append(pick)
             left.remove(pick)
-            cur = colour(ptc, pick)
+            cur_src, cur = ptc, pick
         return order
+
+    def _refill_blockers(self, ptc: Dict[str, Any], ch: int,
+                         attrs_from: Optional[Dict[str, Any]] = None
+                         ) -> List[Tuple[int, str]]:
+        """Toolheads with the same material as `ch` that the printer will
+        not refill from, and why: the moment to fix it is now."""
+        src = attrs_from or ptc
+        ids = list(ptc.get("filament_spool_id") or [])
+        out = []
+        for c in range(len(ids)):
+            if c == ch:
+                continue
+            ok, why = self._refill_check(ptc, ch, c, src)
+            if not ok and why:
+                out.append((c, why))
+        return out
 
     @staticmethod
     def _status_of(remaining: float, need: float) -> str:
@@ -2474,21 +2581,29 @@ class PushNotifications:
                  f"This print needs ~{it['need']:.0f} g more."
                  if it["need"] else ""]
         if it["refill_on"] and it["backups"]:
-            match = ("an exact match" if it["exact"] else
-                     "a compatible spool, not an exact match (the colour "
-                     "may be different)")
             for b in it["backups"]:
                 lines.append(
                     f"Refill is on: "
                     f"{self._desc(b['ch'], b['name'], b['sid'], cap)}"
                     + (f", {b['rem']:.0f} g left" if b["rem"] > 0
-                       else ", amount left unknown") + f", is {match}.")
+                       else ", amount left unknown")
+                    + f", is {self._match_text(b)}.")
         elif it["refill_on"]:
             lines.append("Refill is on. " + (
                 "No exact match spool for refill found on printer."
                 if it["exact"] else
                 "No compatible spool for refill found on printer."))
+        lines.extend(self._blocker_lines(it))
         return self._lines(*lines)
+
+    @staticmethod
+    def _match_text(b: Dict[str, Any]) -> str:
+        return ("an exact match" if b.get("exact") else
+                "an inexact match (same filament, different colour)")
+
+    def _blocker_lines(self, it: Dict[str, Any]) -> List[str]:
+        return [f"Won't refill from {self._toolhead(c)}: {why}."
+                for c, why in it.get("blockers") or []]
 
     def _low_row(self, it: Dict[str, Any]) -> Dict[str, Any]:
         """Like the not-enough picture (with the refill spool, or a note
@@ -2532,11 +2647,9 @@ class PushNotifications:
         unknown_backup = False
         total = max(0., remaining)
 
-        def colour_of(src: Dict[str, Any], c: int) -> str:
-            v = list(src.get("filament_color_rgba") or [])
-            return str(v[c]).strip().lstrip("#").lower()[:6] \
-                if c < len(v) else ""
-        own_colour = colour_of(self._job_ptc or ptc, ch)
+        own_colour = self._colour_multi(self._job_ptc or ptc, ch)
+        it["blockers"] = self._refill_blockers(ptc, ch, self._job_ptc or None) \
+            if it["refill_on"] else []
         for c in self._backups(ptc, ch, self._job_ptc or None):
             b_sid = ids[c] if c < len(ids) else 0
             b = await self._spool(b_sid)
@@ -2555,7 +2668,7 @@ class PushNotifications:
             it["backups"].append(dict(
                 ch=c, sid=b_sid, name=self._spool_name(b), rem=b_rem,
                 full=self._full_weight(b), colour=self._spool_colour(b, c),
-                own=own, exact=colour_of(ptc, c) == own_colour))
+                own=own, exact=self._colour_multi(ptc, c) == own_colour))
         it["total"] = total
         it["together"] = self._status_of(total, need)
         it["unknown_backup"] = unknown_backup
@@ -2576,15 +2689,12 @@ class PushNotifications:
             lines = [f"{desc}: {what} Needs ~{it['need']:.0f} g, "
                      f"{it['rem']:.0f} g left."]
         if it["refill_on"] and it["backups"]:
-            match = ("an exact match" if it["exact"] else
-                     "a compatible spool, not an exact match (the colour "
-                     "may be different)")
             for b in it["backups"]:
                 lines.append(
                     f"Refill is on: {self._desc(b['ch'], b['name'], b['sid'], cap)}"
                     + (f", {b['rem']:.0f} g left" if b["rem"] > 0
                        else ", amount left unknown")
-                    + f", is {match}." + (
+                    + f", is {self._match_text(b)}." + (
                         f" This print also needs ~{b['own']:.0f} g from it."
                         if b["own"] and b["rem"] > 0 else ""))
             unknown = it["unknown_backup"] or it["status"] == "unknown"
@@ -2604,6 +2714,7 @@ class PushNotifications:
                 "No exact match spool for refill found on printer."
                 if it["exact"] else
                 "No compatible spool for refill found on printer."))
+        lines.extend(self._blocker_lines(it))
         return "\n".join(lines)
 
     def _issue_row(self, it: Dict[str, Any]) -> Dict[str, Any]:
@@ -2622,10 +2733,16 @@ class PushNotifications:
                 match="Exact match" if b.get("exact") else "Inexact match")
                 for b in it["backups"]]
         elif it["refill_on"]:
-            row["note"] = ["Refill is on.",
-                           "No exact match spool for" if it["exact"]
-                           else "No compatible spool for",
-                           "refill found on printer."]
+            blockers = it.get("blockers") or []
+            if blockers:
+                c, why = blockers[0]
+                row["note"] = ["Refill is on.", f"Won't refill from "
+                               f"{self._toolhead(c)}:", why]
+            else:
+                row["note"] = ["Refill is on.",
+                               "No exact match spool for" if it["exact"]
+                               else "No compatible spool for",
+                               "refill found on printer."]
         return row
 
     def _short_title(self, issues: List[Dict[str, Any]]) -> str:
@@ -2661,6 +2778,8 @@ class PushNotifications:
         self._job_weights = weights
         self._job_tools = set(weights) or {
             t for t, c in enumerate(emap[:len(ids)]) if isinstance(c, int)}
+        if not self._spoolman_active():
+            return      # seeded for the runout hold and the backup switch
         need: Dict[int, float] = {}
         for tool, grams in weights.items():
             ch = emap[tool] if tool < len(emap) else tool
@@ -2774,7 +2893,11 @@ class PushNotifications:
 
     def _refill_expected(self, ex: Dict[str, Any]) -> bool:
         """A filament runout on a toolhead with a backup spool the printer
-        will refill from by itself."""
+        will refill from by itself. Only when the refill would be reported
+        (the Switched to backup spool row): a held-and-dropped error with
+        nothing in its place would make the refill invisible."""
+        if "spool_switch" not in self.rows:
+            return False
         try:
             # 523 is the whole toolhead module (tangles, pickup and park
             # failures too); code 0 with "runout" is the runout itself
@@ -2860,7 +2983,9 @@ class PushNotifications:
         t_rem = self._remaining(t_spool)
         need = self._need_now(to)
         filename = self._status["print_stats"].get("filename") or ""
-        f_name, t_name = self._spool_name(f_spool), self._spool_name(t_spool)
+        f_name = self._spool_name(f_spool) or \
+            self._printer_filament(self._job_ptc or ptc, frm)
+        t_name = self._spool_name(t_spool) or self._printer_filament(ptc, to)
         body = self._lines(
             shown(filename),
             f"From {self._desc(frm, f_name, f_sid)}.",
@@ -2996,10 +3121,10 @@ class PushNotifications:
                     out.append((t, b, path))
                 per_dest.append(out)
             report: List[Dict[str, Any]] = []
-            results = await asyncio.gather(*(
+            results = self._outcomes(rid, dests, await asyncio.gather(*(
                 self._deliver(rid, d, t, msgs, report)
                 for d, t, msgs in zip(dests, tickets, per_dest)),
-                return_exceptions=True)
+                return_exceptions=True))
             self._console_report(report)
         finally:
             for t in tickets:

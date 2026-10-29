@@ -8,7 +8,7 @@
 # notifications-config.py (validation, generated Moonraker and Klipper
 # config). Needs Python 3.9+, apprise and Pillow; no printer or network.
 #
-#   python3 overlays/firmware-extended/39-feature-notifications/test/notifications_test.py
+#   python3 overlays/firmware-extended/42-feature-notifications/test/notifications_test.py
 #
 # Exits non-zero if any check fails.
 
@@ -82,6 +82,7 @@ import moonraker.components.push_notifications as pn  # noqa: E402
 
 pn.SEND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 pn.CONSOLE_GROUP = 0.05
+RANK_RED = 2
 CONSOLE = []
 pn.PAUSE_SNAPSHOT_DELAY = 0.1
 pn.FILAMENT_POLL = 0.2
@@ -497,6 +498,152 @@ async def test_filament_measured():
           c._need_now(1) is None)
 
 
+async def test_filament_alerts():
+    print("Filament alerts: not enough at start, worse mid-print, "
+          "running low (remembered across restarts), long messages split")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({"spoolman_url": "http://spoolman:7912",
+                      "filament_low_percent": "10",
+                      "filament_low_grams": "50"},
+                     {"filament_short": [("ntfy", ntfy, False)],
+                      "filament_low": [("ntfy", ntfy, False)]})
+
+    def spool(sid, rem, name="PLA"):
+        SPOOLS[sid] = {"id": sid, "remaining_weight": rem,
+                       "initial_weight": 1000,
+                       "filament": {"name": name, "vendor": {"name": "X"},
+                                    "color_hex": "FF0000", "weight": 1000}}
+    # T0 on toolhead 1 needs 120 g of a spool with 100 g (red); T1 on
+    # toolhead 2 needs 20 g of 24 g (orange, within 20 g); toolhead 3 is
+    # an exact-match backup for toolhead 1 with 300 g
+    META["filament_weight"] = [120.0, 20.0]
+    STATE["print_task_config"] = {
+        "extruder_map_table": [0, 1], "filament_spool_id": [10, 20, 30],
+        "extruders_used": [True, True, False],
+        "auto_replenish_filament": True, "replenish_ignore_color": False,
+        "filament_exist": [True, True, True], "filament_vendor": ["X"] * 3,
+        "filament_type": ["PLA"] * 3, "filament_sub_type": [""] * 3,
+        "filament_color_rgba": ["FF0000FF"] * 3}
+    spool(10, 100.0)
+    spool(20, 24.0)
+    spool(30, 300.0)
+    # Moonraker up first (idle), then the job starts
+    STATE["print_stats"] = ps("standby")
+    await server.handlers["server:klippy_ready"]()
+    STATE["print_stats"] = ps("printing")
+    STATE["virtual_sdcard"] = {"file_position": 1000, "progress": 0}
+    await server.handlers["job_state:state_changed"](
+        JobEvent.STARTED, {}, STATE["print_stats"])
+    await asyncio.sleep(0.4)
+    titles = [e["title"] for e in log]
+    check("one not-enough notification at start, for both toolheads",
+          titles == ["🧵 U1 filament problems on 2 toolheads"], titles)
+    body = log[0]["body"] if log else ""
+    check("...red names the shortfall and the refill chain (toolhead 2 "
+          "first, with what the print needs from it, then 3)",
+          "Toolhead 1 (X PLA, spool #10): not enough filament. Needs ~120 g, "
+          "100 g left.\nRefill is on: Toolhead 2 (X PLA, spool #20), 24 g "
+          "left, is an exact match. This print also needs ~20 g from it.\n"
+          "Refill is on: Toolhead 3 (X PLA, spool #30), 300 g left, is an "
+          "exact match.\nTogether 404 g: enough for this print." in body,
+          body)
+    check("...orange says may be insufficient",
+          "Toolhead 2 (X PLA, spool #20): remaining filament may be "
+          "insufficient. Needs ~20 g, 24 g left." in body, body)
+    check("spools reported at start aren't also reported as running low",
+          not [t for t in titles if "running low" in t], titles)
+    log.clear()
+    # Mid-print (half way): toolhead 1 used 50 g and needs 70 more of its
+    # 50 g (worse than the orange it was reported as); toolhead 2 is as
+    # it was: only the one that got worse is reported
+    STATE["virtual_sdcard"]["file_position"] = 6000
+    c._status["virtual_sdcard"]["file_position"] = 6000
+    spool(10, 50.0)
+    track = {0: dict(sid=10, reported=1), 1: dict(sid=20, reported=1)}
+    await c._poll_spools("Benchy.gcode", track)
+    await asyncio.sleep(0.4)
+    titles = [e["title"] for e in log]
+    check("mid-print: only a toolhead that got worse is reported again",
+          titles == ["🧵 U1 not enough filament"]
+          and "Toolhead 1 (X PLA, spool #10): not enough filament. Needs "
+          "~70 g, 50 g left." in log[0]["body"]
+          and "Toolhead 2 (X PLA, spool #20): " not in log[0]["body"],
+          (titles, log and log[0]["body"]))
+    log.clear()
+    await c._poll_spools("Benchy.gcode", track)
+    await asyncio.sleep(0.3)
+    check("...and not again while it stays the same", log == [])
+
+    # Running low: whichever of 10% / 50 g comes first; once per spool
+    # until it is refilled, remembered across a restart
+    low_path = c._low_path
+    spool(30, 90.0)
+    track = {2: dict(sid=30, reported=0)}
+    c._switched_to = set()
+    await c._poll_spools("Benchy.gcode", track)
+    await asyncio.sleep(0.3)
+    check("a spool at 9% of a full spool is running low",
+          [e["title"] for e in log] == ["🧵 U1 spool running low"]
+          and "90 of 1000 g left" in log[0]["body"],
+          [(e["title"], e["body"]) for e in log])
+    log.clear()
+    spool(30, 80.0)
+    await c._poll_spools("Benchy.gcode", track)
+    await asyncio.sleep(0.3)
+    check("...once: not again as it goes lower", log == [])
+    # Moonraker restarted: the memory is read back from disk
+    c._low_sent = None
+    check("the low spool is remembered on disk",
+          "30" in c._low_load(), c._low_load())
+    await c._poll_spools("Benchy.gcode", track)
+    await asyncio.sleep(0.3)
+    check("...so it isn't reported again after a restart", log == [])
+    spool(30, 900.0)
+    await c._poll_spools("Benchy.gcode", track)
+    spool(30, 45.0)
+    await c._poll_spools("Benchy.gcode", track)
+    await asyncio.sleep(0.3)
+    check("refilled, then below 50 g: reported again (grams before %)",
+          [e["title"] for e in log] == ["🧵 U1 spool running low"]
+          and "45 of 1000 g left" in log[0]["body"],
+          [(e["title"], e["body"]) for e in log])
+
+    # Long messages: 4 toolheads with long spool names on a service with
+    # a short limit are split into parts, none cutting a toolhead's text
+    log.clear()
+    limits = dict(pn.BODY_LIMITS)
+    pn.BODY_LIMITS["ntfy"] = (True, 360)
+    try:
+        issues = []
+        for ch in range(4):
+            spool(100 + ch, 10.0, name="A very long filament name " * 3)
+            issues.append(await c._issue(
+                STATE["print_task_config"], ch, 100 + ch, SPOOLS[100 + ch],
+                10.0, 200.0, {ch: 200.0}))
+        await c._short_alert("Benchy.gcode", issues)
+        await asyncio.sleep(0.4)
+        parts = [e for e in log if "filament problems" in e["title"]]
+        check("split into numbered parts that each fit",
+              len(parts) > 1 and all(f"({n}/{len(parts)})" in e["title"]
+                                     for n, e in enumerate(parts, 1))
+              and all(len(e["body"]) <= 360 for e in parts),
+              [(e["title"], len(e["body"])) for e in parts])
+        check("...every toolhead once, none split across parts",
+              sorted(th for e in parts for th in
+                     ["Toolhead %d" % (i + 1) for i in range(4)
+                      if f"\nToolhead {i + 1} (" in "\n" + e["body"]
+                      and ": not enough" in e["body"]])
+              == ["Toolhead 1", "Toolhead 2", "Toolhead 3", "Toolhead 4"]
+              and all(e["body"].count(": not enough filament") == 1
+                      for e in parts),
+              [e["body"] for e in parts])
+    finally:
+        pn.BODY_LIMITS.clear()
+        pn.BODY_LIMITS.update(limits)
+
+
 async def test_faults_over_a_job():
     print("Faults across pause, resume and cancel")
     reset_world()
@@ -665,6 +812,43 @@ async def test_spool_switch():
         else:
             check("runout with no refill: the error after the wait",
                   titles == ["Error: paused"], titles)
+    # The same without Spoolman: the hold and the switch still work (the
+    # toolhead map and refill settings come from the printer), only the
+    # spool names and weights are missing
+    for switch_row in (True, False):
+        reset_world()
+        log = []
+        ntfy = FakeService(log, "ntfy")
+        rows = {"error": [("ntfy", ntfy, False)]}
+        if switch_row:
+            rows["spool_switch"] = [("ntfy", ntfy, False)]
+        server, c = make({}, rows)
+        STATE["print_task_config"] = {
+            "extruder_map_table": [0, 0], "filament_spool_id": [0, 0],
+            "extruders_used": [True, False], "auto_replenish_filament": True,
+            "replenish_ignore_color": False, "filament_exist": [True, True],
+            "filament_vendor": ["X", "X"], "filament_type": ["PLA", "PLA"],
+            "filament_sub_type": ["", ""],
+            "filament_color_rgba": ["FF0000FF"] * 2}
+        await start_job(server)
+        await asyncio.sleep(0.3)
+        STATE["print_stats"] = ps("paused", exception=ex)
+        c._status["print_stats"]["state"] = "paused"
+        await server.handlers["job_state:state_changed"](
+            JobEvent.PAUSED, {}, STATE["print_stats"])
+        await asyncio.sleep(0.6)
+        await c._on_status_update(
+            {"print_task_config": {"extruder_map_table": [1, 0]}}, 0)
+        await asyncio.sleep(2.2)
+        titles = [e["title"].split(" ", 2)[2] for e in log]
+        if switch_row:
+            check("no Spoolman: a refilled runout is still just the switch",
+                  titles == ["switched to backup spool"]
+                  and "#0" not in log[0]["body"], (titles, log and log[0]["body"]))
+        else:
+            check("no Spoolman and no switch row: the runout error is sent "
+                  "(never a silent refill)", titles == ["Error: paused"],
+                  titles)
     pn.REFILL_WAIT = 25.
     tangle = {"id": 523, "index": 0, "code": 38,
               "message": "detect filament tangled!", "level": 2}
@@ -702,7 +886,7 @@ async def test_calibration():
     STATE["print_stats"] = ps("standby")
     await server.handlers["server:klippy_ready"]()
     nc_hold = sys.modules[type(c).__module__]
-    nc_hold.INTERVENTION_HOLD = 0.2
+    nc_hold.INTERVENTION_HOLD = 0.4   # gaps between steps below: 0.1
 
     async def msm(state, action=0):
         await c._on_status_update(
@@ -713,7 +897,7 @@ async def test_calibration():
     await msm(3, 258)
     await msm(3, 256)
     await msm(0)                   # back to idle
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.8)
     check("a touchscreen calibration ending in idle is reported, by name",
           titles() == ["📐 U1 Bed levelling complete"], titles())
     log.clear()
@@ -722,12 +906,12 @@ async def test_calibration():
     await msm(2, 192)              # brush toolhead 1
     await msm(2, 201)              # cooling
     await msm(2, 0)                # the screen waits for a tap
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.8)
     await msm(2, 196)              # probing
     await asyncio.sleep(0.1)
     await msm(2, 0)                # a short gap between machine steps
     await msm(2, 197)
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.8)
     check("manual clean and a held idle are user intervention; short gaps "
           "aren't", titles() == ["🖐️ U1 user intervention needed"] * 2
           and "Brush the nozzle of Toolhead 1" in log[0]["body"]
@@ -735,7 +919,7 @@ async def test_calibration():
     log.clear()
     await msm(5, 384)              # queued: straight into input shaper
     await msm(0)
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.8)
     check("a queued calibration completes the previous one",
           titles() == ["📐 U1 XYZ offset calibration complete",
                        "📐 U1 Input shaper calibration complete"]
@@ -744,12 +928,12 @@ async def test_calibration():
     log.clear()
     await msm(5, 384)
     await msm(9)                   # ends somewhere other than idle
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.8)
     check("one that doesn't end in idle isn't reported", log == [])
     await msm(0)
     await msm(4, 320)
     await msm(7)                   # ABNORMAL
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.8)
     check("one that ends abnormal is reported as failed",
           titles() == ["📐 U1 Flow calibration failed"], titles())
     log.clear()
@@ -757,7 +941,7 @@ async def test_calibration():
     await start_job(server)        # the start routine's bed mesh
     await msm(3, 257)
     await msm(3, 0)
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.8)
     await msm(1)                   # back to printing
     await asyncio.sleep(0.3)
     check("nothing during a print job", log == [], titles())
@@ -1019,10 +1203,12 @@ async def test_chamber():
 
 
 async def test_backup_order():
-    print("Backup spools: in the order the printer uses them")
+    print("Backup spools: the printer's rule, in the order it uses them")
     reset_world()
     _server, c = make({}, {})
-    B = type(c)._backups
+    B = c._backups
+    for n, e in enumerate(pn.EXTRUDERS):
+        c._status[e] = {"nozzle_diameter": 0.4, "nozzle_volume_type": "std"}
     ptc = dict(auto_replenish_filament=True, replenish_ignore_color=True,
                filament_spool_id=[1, 2, 3, 4], filament_exist=[1, 1, 1, 1],
                filament_type=["PLA"] * 4, filament_vendor=["Elegoo"] * 4,
@@ -1039,6 +1225,31 @@ async def test_backup_order():
           == [2, 3])
     check("refill off: none", B(dict(ptc, auto_replenish_filament=False), 0)
           == [])
+    # What the printer refuses: vendor NONE, another nozzle, multi-colour
+    none = dict(ptc, filament_vendor=["NONE", "NONE", "Elegoo", "Elegoo"])
+    check("vendor NONE is never a backup (even NONE for NONE)",
+          B(none, 0) == [] and B(none, 2) == [3], (B(none, 0), B(none, 2)))
+    c._status["extruder1"] = {"nozzle_diameter": 0.6,
+                              "nozzle_volume_type": "std"}
+    check("another nozzle is skipped", B(ptc, 0) == [2, 3], B(ptc, 0))
+    c._status["extruder1"] = {"nozzle_diameter": 0.4,
+                              "nozzle_volume_type": "std"}
+    multi = dict(ptc, filament_color_multi=[
+        {"nums": 2, "colors": ["0000FF", "FFFFFF"]},
+        {"nums": 1, "colors": ["0000FF"]},
+        {"nums": 2, "colors": ["0000FF", "FFFFFF"]},
+        {"nums": 1, "colors": ["FF0000"]}], replenish_ignore_color=False)
+    check("exact colour compares the whole multi-colour set",
+          B(multi, 0) == [2], B(multi, 0))
+    check("blockers: same material but not refillable, with why",
+          c._refill_blockers(dict(ptc, replenish_ignore_color=False,
+                                  filament_vendor=["Elegoo", "NONE",
+                                                   "Elegoo", "Elegoo"]), 0)
+          == [(1, "no filament info set on the printer (vendor NONE)"),
+              (3, "colour differs (refill needs an exact match)")],
+          c._refill_blockers(dict(ptc, replenish_ignore_color=False,
+                                  filament_vendor=["Elegoo", "NONE",
+                                                   "Elegoo", "Elegoo"]), 0))
 
 
 async def test_console():
@@ -1067,6 +1278,23 @@ async def test_console():
               'Sent notification "✅ U1 complete" to ntfy, with picture',
               '!! Failed to send notification "✅ U1 complete" to email, '
               'webhook (timed out), attempt 4/4'], CONSOLE)
+    # A delivery that crashes (bug, or Apprise raising) is a failure, not
+    # a success, and is logged and shown
+    class Boom(FakeService):
+        async def async_notify(self, *a, **k):
+            raise RuntimeError("boom")
+    log2 = []
+    server, c = make({}, {"complete": [("ntfy", Boom(log2, "ntfy"), False),
+                                       ("email", FakeService(log2, "email"),
+                                        True)]})
+    CONSOLE.clear()
+    ok = await c._send("complete", "✅ U1 complete", "Benchy")
+    await asyncio.sleep(0.3)
+    check("a crashed delivery counts as failed and is reported",
+          ok is False and CONSOLE == [
+              'Sent notification "✅ U1 complete" to email, with picture',
+              '!! Failed to send notification "✅ U1 complete" to ntfy '
+              '(error: RuntimeError), attempt 4/4'], (ok, CONSOLE))
     check("short causes", [pn.short_cause([m]) for m in (
         "Failed to send ntfy notification to topic 'u1': Unauthorized, "
         "error=401.", "Socket Exception: (535, b'5.7.8 Username and "
@@ -1247,7 +1475,7 @@ async def test_config_lines():
 async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
-              test_email_threads, test_filament_measured,
+              test_email_threads, test_filament_measured, test_filament_alerts,
               test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber, test_backup_order, test_console,
               test_driver_hot,
               test_print_by_object,
@@ -1277,6 +1505,7 @@ def run_config_tests():
     nc = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(nc)
     nc.camera_status = lambda: {"internal": True, "usb": False}
+    real_printer_busy = nc.printer_busy     # save() below replaces it
 
     def bad(data, what):
         try:
@@ -1575,6 +1804,79 @@ def run_config_tests():
     check("Discord: mention only on high/max",
           "ping=everyone" in nc.row_url(d, "error", "max", True)
           and "ping" not in nc.row_url(d, "complete", "default", True))
+
+    # A new token with nothing else changed: the generated config refers
+    # to it by name, so Moonraker must still restart to read it
+    rc, out = save(dict(base, name="U1b", auth="token", secret="tk_one"))
+    check("a token restarts Moonraker", rc == 0 and calls == ["S61moonraker"],
+          (rc, calls, out))
+    rc, out = save(dict(base, name="U1b", auth="token", secret="tk_two"))
+    check("rotating the token (settings unchanged) restarts Moonraker",
+          rc == 0 and calls == ["S61moonraker"], (rc, calls, out))
+    rc, out = save(dict(base, name="U1b", auth="token"))
+    check("...and nothing changed: no restart", rc == 0 and calls == [],
+          (rc, calls, out))
+
+    # The email password is bound to the server and account it was
+    # entered for, like the push secret
+    mail = dict(base, name="U1b", auth="token", email_enabled=True,
+                email_host="smtp.gmail.com", email_port=587,
+                email_security="starttls", email_username="me@gmail.com",
+                email_password="app-pass", email_from="me@gmail.com",
+                email_to="me@gmail.com")
+    rc, out = save(mail)
+    check("email password saved with its scope", rc == 0
+          and nc.load()["email_password_for"]
+          == "smtp.gmail.com|587|starttls|me@gmail.com",
+          (rc, nc.load().get("email_password_for")))
+    for change in (dict(email_host="smtp.evil.example"),
+                   dict(email_security="none"),
+                   dict(email_username="other@gmail.com")):
+        rc, out = save(dict(mail, email_password="", **change))
+        check(f"another {list(change)[0]} never gets the saved password",
+              rc == "ERROR" and "another server or account" in out,
+              (change, rc, out))
+    rc, out = save(dict(mail, email_password="", email_to="you@gmail.com"))
+    check("the same server and account keeps it", rc == 0, (rc, out))
+    rc, out = save(dict(mail, email_password="new-pass",
+                        email_host="smtp.other.example"))
+    check("a new password for another host is fine", rc == 0, (rc, out))
+
+    # Settings from before the secrets were scoped: bound to what they
+    # were saved with, not to anything
+    nc.write_secrets({"secret": "tk_old"})
+    old = nc.load()
+    check("an unscoped stored secret is bound to the saved service",
+          old["secret_for"] == nc.secret_scope(old), old["secret_for"])
+    try:
+        nc.validate(dict(provider="pushover", pushover_user="u" * 30), old)
+        check("...so another service doesn't get it", False)
+    except nc.ConfigError as e:
+        check("...so another service doesn't get it",
+              "another service or server" in str(e), str(e))
+    nc.write_secrets({})
+
+    # Unreachable is not busy
+    nc.MOONRAKER_URL = "http://127.0.0.1:1"
+    nc.KLIPPY_SOCK = os.path.join(cfgdir, "no-such.sock")
+    check("neither Moonraker nor Klipper answering: not busy",
+          real_printer_busy() is False)
+    import socket as _socket
+    import threading
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    srv.bind(nc.KLIPPY_SOCK)
+    srv.listen(1)
+
+    def klippy():
+        conn, _ = srv.accept()
+        conn.recv(4096)
+        conn.sendall(json.dumps({"id": 1, "result": {"status": {
+            "print_stats": {"state": "printing"}}}}).encode() + b"\x03")
+        conn.close()
+    threading.Thread(target=klippy, daemon=True).start()
+    check("Moonraker down, Klipper printing: busy",
+          real_printer_busy() is True)
+    srv.close()
 
 
 def main():

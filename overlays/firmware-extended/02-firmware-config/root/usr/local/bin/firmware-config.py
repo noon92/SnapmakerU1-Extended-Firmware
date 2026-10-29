@@ -413,9 +413,18 @@ class FirmwareConfigHandler(SimpleHTTPRequestHandler):
             # this page. A JSON content type makes a cross-site browser
             # request need a preflight, which this server never grants.
             ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+            # Same-origin check by host name only: nginx forwards Host
+            # without its port, so a page opened on another port (or
+            # through a relay) would never match host:port
+            def host_only(netloc):
+                netloc = netloc.strip().lower()
+                if netloc.startswith('['):          # [ipv6]:port
+                    return netloc.split(']', 1)[0] + ']'
+                return netloc.rsplit(':', 1)[0] if netloc.count(':') == 1 else netloc
             origin = self.headers.get('Origin') or ''
-            host = self.headers.get('Host') or ''
-            if ctype != 'application/json' or (origin and origin.split('//', 1)[-1] != host):
+            host = host_only(self.headers.get('Host') or '')
+            origin_host = host_only(origin.split('//', 1)[-1].split('/', 1)[0])
+            if ctype != 'application/json' or (origin and origin_host != host):
                 self.send_error(403, "Form requests must come from this page")
                 return
             content_length = int(self.headers.get('Content-Length', 0))

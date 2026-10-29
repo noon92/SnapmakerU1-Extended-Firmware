@@ -133,8 +133,10 @@ ROWS = [
      "spoolman", True),
     ("filament_low", "Spool running low", "🧵", True, "default", "spool",
      "spoolman", False),
+    # The printer's own refill (its toolhead map), with or without
+    # Spoolman: Spoolman only adds the spools' names and weights
     ("spool_switch", "Switched to backup spool", "🔄", True, "default",
-     "spool", "spoolman", False),
+     "spool", "refill", False),
 ]
 ROW_IDS = [r[0] for r in ROWS]
 # Print-by-object: "Print complete" for each object is sent as its own
@@ -143,7 +145,9 @@ ROW_IDS = [r[0] for r in ROWS]
 OBJECT_ROW = "object_complete"
 ROW = {r[0]: r for r in ROWS}
 ERROR_ROWS = ("error", "warning", "shutdown")
+# Rows that read Spoolman (the first two need it; the switch works without)
 SPOOLMAN_ROWS = ("filament_short", "filament_low", "spool_switch")
+SPOOLMAN_ONLY = ("filament_short", "filament_low")
 SPOOLMAN_REV = "2"   # bump when saved Spoolman settings need migrating
 
 RX_SERVER = re.compile(r"https?://[A-Za-z0-9.\-]+(:\d{1,5})?/?")
@@ -219,6 +223,7 @@ def defaults():
         "discord_mention": "",
         "secret": "",
         "secret_for": "",       # the service the push secret belongs to
+        "email_password_for": "",   # the SMTP server and account it's for
         "printer_url": "",
         "camera": "internal",
         "name": "U1",
@@ -368,6 +373,13 @@ def load():
         if stored.get(key):
             s[key] = stored[key]
     s["secret_for"] = stored.get("secret_for", s.get("secret_for", ""))
+    s["email_password_for"] = stored.get("email_password_for", "")
+    # Settings from before the secrets were scoped: the secrets belong to
+    # the service and server they were saved with
+    if s["secret"] and not s["secret_for"]:
+        s["secret_for"] = secret_scope(s)
+    if s["email_password"] and not s["email_password_for"]:
+        s["email_password_for"] = email_scope(s)
     return s
 
 
@@ -531,6 +543,8 @@ def validate(data, current):
         s["push_enabled"] = bool(data["push_enabled"])
     if "secret" in data and str(data["secret"]):
         s["secret_for"] = ""     # set below, once the service is known
+    if "email_password" in data and str(data["email_password"]):
+        s["email_password_for"] = ""
     if "email_enabled" in data:
         s["email_enabled"] = bool(data["email_enabled"])
     if "webhook_enabled" in data:
@@ -741,6 +755,14 @@ def validate_email(s):
     if s["email_username"] and not RX_EMAIL_USER.fullmatch(
             s["email_username"]):
         raise ConfigError("Email username must not contain spaces")
+    scope = email_scope(s)
+    if s["email_password"] and s.get("email_password_for", "") \
+            not in ("", scope):
+        s["email_password"] = ""
+        raise ConfigError(
+            "The saved email password was entered for another server or "
+            "account. Enter it again.")
+    s["email_password_for"] = scope if s["email_password"] else ""
     if s["email_username"] and not s["email_password"]:
         raise ConfigError("Email password is missing")
     if not RX_EMAIL.fullmatch(s["email_from"]):
@@ -753,10 +775,19 @@ def validate_email(s):
     s["email_to"] = ", ".join(to)
     if not s["email_username"]:
         s["email_password"] = ""
+        s["email_password_for"] = ""
 
 
 def is_public(server):
     return urlparse(server).hostname in ("ntfy.sh", "www.ntfy.sh")
+
+
+def email_scope(s):
+    """What a stored email password is bound to: the server and account it
+    was entered for, so it is never sent to another host (or in the clear
+    to the same one)."""
+    return (f"{s['email_host'].lower()}|{s['email_port']}|"
+            f"{s['email_security']}|{s['email_username']}")
 
 
 def secret_scope(s):
@@ -925,10 +956,10 @@ def spoolman_url():
 
 
 def available_rows():
-    """The Spoolman rows need the Spoolman integration."""
+    """The filament rows need the Spoolman integration."""
     if spoolman_url():
         return ROW_IDS
-    return [rid for rid in ROW_IDS if rid not in SPOOLMAN_ROWS]
+    return [rid for rid in ROW_IDS if rid not in SPOOLMAN_ONLY]
 
 
 def push_rows(s):
@@ -1015,7 +1046,7 @@ def render_moonraker(s, sec=None):
     # object_complete rows below exist
     if s["timezone"]:
         out.append(f"timezone: {s['timezone']}")
-    if any(r in rows for r in SPOOLMAN_ROWS):
+    if any(r in rows for r in SPOOLMAN_ROWS) and spoolman_url():
         out.append(f"spoolman_url: {spoolman_url()}")
         out.append(f"filament_low_percent: {s['filament_low_percent']}")
         out.append(f"filament_low_grams: {s['filament_low_grams']}")
@@ -1201,15 +1232,43 @@ def telegram_find_chat(s):
     print(f"Telegram chat found: {name} ({s['telegram_chat']})")
 
 
+KLIPPY_SOCK = os.environ.get("NOTIFICATIONS_KLIPPY_SOCK",
+                             "/home/lava/printer_data/comms/klippy.sock")
+
+
 def printer_busy():
-    """True if printing or paused, or if that cannot be confirmed."""
+    """True if a print job is printing or paused. Asked of Moonraker, and
+    of Klipper itself when Moonraker doesn't answer (a print job runs in
+    Klipper, with or without Moonraker). Neither answering means nothing
+    is printing: "unreachable" must not read as "busy", or a broken
+    Moonraker config could never be fixed from here."""
     try:
         url = MOONRAKER_URL + "/printer/objects/query?print_stats=state"
         with urllib.request.urlopen(url, timeout=5) as resp:
             state = json.load(resp)["result"]["status"]["print_stats"]["state"]
         return state in ("printing", "paused")
     except Exception:
-        return True
+        pass
+    import socket
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(KLIPPY_SOCK)
+            sock.sendall(json.dumps({
+                "id": 1, "method": "objects/query",
+                "params": {"objects": {"print_stats": ["state"]}}}
+            ).encode() + b"\x03")
+            data = b""
+            while b"\x03" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        reply = json.loads(data.split(b"\x03", 1)[0].decode())
+        state = reply["result"]["status"]["print_stats"]["state"]
+        return state in ("printing", "paused")
+    except Exception:
+        return False
 
 
 def local_ip():
@@ -1495,9 +1554,17 @@ def cmd_save():
     except ValueError as e:
         raise ConfigError(f"Invalid settings: {e}")
     apprise_check(s)
+    # Secrets first: if their file can't be written, extended2.cfg (which
+    # the next line blanks the secrets in) is untouched
+    try:
+        secrets_changed = write_secrets(dict(
+            sec.values, **{k: s[k] for k in SECRET_FIELDS},
+            secret_for=s["secret_for"],
+            email_password_for=s["email_password_for"]))
+    except OSError as e:
+        raise ConfigError(f"Could not write {SECRETS_FILE}: {e}. Nothing "
+                          "was saved.")
     store(s)
-    write_secrets(dict(sec.values, **{k: s[k] for k in SECRET_FIELDS},
-                       secret_for=s["secret_for"]))
     print("Settings saved.")
     if push_configured(s) and s["provider"] == "gotify":
         print("WARNING: Text only: picture attachments not supported by "
@@ -1508,7 +1575,10 @@ def cmd_save():
     # Services only read their config at start, so writing now is safe
     # even mid-print; the service hooks re-render the same content later.
     restart = []
-    if write_generated(MOONRAKER_CFG, moonraker_text) or \
+    # The generated config refers to secrets by name, so a new token or
+    # password changes nothing in it: Moonraker must still restart to
+    # read the new value
+    if write_generated(MOONRAKER_CFG, moonraker_text) or secrets_changed or \
             os.path.exists(PENDING_RESTART["moonraker"]):
         restart.append(("Moonraker", os.path.join(INIT_D, "S61moonraker")))
     if write_generated(KLIPPER_CFG, klipper_text) or \
@@ -1780,7 +1850,8 @@ def cmd_render(path, renderer):
             sec = SecretBag()
             text = renderer(s, sec)
             write_secrets(dict(sec.values, **{k: s[k] for k in SECRET_FIELDS},
-                               secret_for=s["secret_for"]))
+                               secret_for=s["secret_for"],
+                               email_password_for=s["email_password_for"]))
             if any(read_cfg()[SECTION].get(k) for k in SECRET_FIELDS
                    if read_cfg().has_section(SECTION)):
                 store(s)    # older settings: move secrets out of the cfg

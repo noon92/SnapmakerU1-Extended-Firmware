@@ -148,9 +148,11 @@ MSM_ABNORMAL = 7
 # action_code values (same file) of the steps that wait for a person:
 # MANUAL_CLEAN_EXTRUDER..3 (brush the nozzle, then tap the screen)
 MANUAL_CLEAN = {192: 1, 193: 2, 194: 3, 195: 4}
-# ...and a calibration sitting at action IDLE (0) this long is the screen
-# waiting for a tap (plate out / plate back in). Machine steps are never
-# reported as idle; the gaps between them are a second or two.
+# ...and a calibration sitting at action IDLE (0) this long, with Klipper
+# idle too (idle_timeout "Ready": no moves, no heat-up running), is the
+# screen waiting for a tap (plate out / plate back in). Picking up and
+# heating a toolhead also runs at action IDLE, for longer than this, but
+# Klipper is "Printing" then, which restarts the count.
 INTERVENTION_HOLD = 15.
 FAULT_ROWS = ("error", "warning", "shutdown")
 # Chamber temperature, whatever heats the chamber: a print job "waits" when,
@@ -729,7 +731,9 @@ class PushNotifications:
         self._status: Dict[str, Dict[str, Any]] = {
             "print_stats": {}, "virtual_sdcard": {}, "print_task_config": {},
             "exclude_object": {}, "machine_state_manager": {},
+            "idle_timeout": {},
             **{d: {} for d in DRIVERS}, **{e: {} for e in EXTRUDERS}}
+        self._cal_busy_at = 0.      # when Klipper was last seen busy
         # Chamber: the printer's heater_generic objects, whether it has
         # Snapmaker's chamber sensor / purifier / a DragonBreath (found at
         # klippy_ready), and this job's chamber state (see _track_chamber)
@@ -1845,9 +1849,17 @@ class PushNotifications:
                                self._lines(filename, *lines)))
 
     async def _intervention_hold(self, hold: int, what: str) -> None:
-        await asyncio.sleep(INTERVENTION_HOLD)
-        if hold != self._cal_hold or self._job_active:
-            return      # the calibration moved on (or ended) meanwhile
+        start = time.monotonic()
+        while True:
+            now = time.monotonic()
+            if self._status["idle_timeout"].get("state") == "Printing":
+                self._cal_busy_at = now
+            due = max(start, self._cal_busy_at) + INTERVENTION_HOLD
+            if now >= due:
+                break
+            await asyncio.sleep(min(due - now, 1.))
+            if hold != self._cal_hold or self._job_active:
+                return      # the calibration moved on (or ended) meanwhile
         await self._send("calibration", self._title("intervention"),
                          self._lines(what, "The screen is waiting for you."),
                          camera_wait=0.)
@@ -1962,6 +1974,8 @@ class PushNotifications:
                                                    "action_code"]}
                         if "calibration" in self.rows
                         or self._ch_purifier else {}),
+                     **({"idle_timeout": ["state"]}
+                        if "calibration" in self.rows else {}),
                      **chamber),
                 self._on_status_update, default={})
         except Exception as e:
@@ -1991,6 +2005,8 @@ class PushNotifications:
         ps = self._status["print_stats"]
         if "print_task_config" in data and self._job_active:
             self._check_spool_switch()
+        if (data.get("idle_timeout") or {}).get("state") == "Printing":
+            self._cal_busy_at = time.monotonic()
         if "machine_state_manager" in data:
             self._track_calibration()
         if self._job_active and self._ch:

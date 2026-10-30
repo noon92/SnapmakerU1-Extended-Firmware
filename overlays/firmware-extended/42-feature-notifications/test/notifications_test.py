@@ -917,6 +917,22 @@ async def test_calibration():
           and "Brush the nozzle of Toolhead 1" in log[0]["body"]
           and "waiting for you" in log[1]["body"], (titles(), [e["body"] for e in log]))
     log.clear()
+    # Action IDLE while Klipper is busy (picking up and heating the next
+    # toolhead, 18 s in the logs) is not the screen waiting: the count
+    # only runs while Klipper is idle
+    await msm(2, 201)
+    await c._on_status_update({"idle_timeout": {"state": "Printing"}}, 0)
+    await msm(2, 0)                # park, pick, heat: Klipper busy
+    await asyncio.sleep(0.6)
+    check("idle action while Klipper is busy: nothing", log == [], titles())
+    await c._on_status_update({"idle_timeout": {"state": "Ready"}}, 0)
+    await asyncio.sleep(0.2)
+    check("...not yet once Klipper went idle", log == [], titles())
+    await asyncio.sleep(0.5)
+    check("...then user intervention after the hold from when it went idle",
+          titles() == ["🖐️ U1 user intervention needed"], titles())
+    log.clear()
+    await msm(2, 200)              # auto clean: a step, no hold
     await msm(5, 384)              # queued: straight into input shaper
     await msm(0)
     await asyncio.sleep(0.8)

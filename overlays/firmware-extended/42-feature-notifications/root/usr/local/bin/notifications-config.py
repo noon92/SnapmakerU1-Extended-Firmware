@@ -110,7 +110,7 @@ ROWS = [
     ("calibration", "Manual calibrations", "📐", True, "high", "snapshot",
      "print", False),
     # Filament loaded into or unloaded from a toolhead, outside a print job
-    ("filament_change", "Filament loaded / unloaded", "🧵", True, "low",
+    ("filament_change", "Filament loaded / unloaded", "🧵", False, "low",
      "snapshot", "print", False),
     # Chamber temperature: only when a print job waits on a chamber target
     # (any chamber heater, or Snapmaker's own chamber wait)
@@ -188,6 +188,7 @@ STRING_FIELDS = ("provider", "server", "topic", "auth", "username",
                  "gotify_server",
                  "discord_user", "discord_mention", "printer_url",
                  "camera", "name", "timezone", "first_layer_objects",
+                 "filament_change_events",
                  "complete_objects",
                  "email_host",
                  "email_security", "email_username", "email_from",
@@ -235,6 +236,7 @@ def defaults():
         # Print-by-object: "layer N complete" and "Print complete" for
         # each object, or once per print job
         "first_layer_objects": "each",
+        "filament_change_events": "loaded,unloaded",
         "complete_objects": "each",
         "filament_low_percent": 10,
         "filament_low_grams": 50,
@@ -470,6 +472,7 @@ def section_lines(s):
         f"timezone: {s['timezone']}",
         f"layers_complete: {s['layers_complete']}",
         f"first_layer_objects: {s['first_layer_objects']}",
+        f"filament_change_events: {s['filament_change_events']}",
         f"complete_objects: {s['complete_objects']}",
         f"filament_low_percent: {s['filament_low_percent']}",
         f"filament_low_grams: {s['filament_low_grams']}",
@@ -631,6 +634,10 @@ def validate(data, current):
         if s[key] not in ("each", "once"):
             raise ConfigError("When printing by object: once per object "
                               "or once per print job")
+    events = [e for e in s["filament_change_events"].split(",") if e]
+    if any(e not in ("loaded", "unloaded") for e in events):
+        raise ConfigError("Filament loaded / unloaded: loaded, unloaded")
+    s["filament_change_events"] = ",".join(events)
     if not RX_NAME.fullmatch(s["name"]):
         raise ConfigError("Printer name: up to 32 letters, digits, spaces "
                           "and . _ - ( )")
@@ -1043,6 +1050,8 @@ def render_moonraker(s, sec=None):
         out.append(f"snapshot_url: {SNAPSHOT_HOST}{SNAPSHOT_PATH[s['camera']]}")
     out.append(f"layers_complete: {s['layers_complete']}")
     out.append(f"first_layer_objects: {s['first_layer_objects']}")
+    if "filament_change" in rows:
+        out.append(f"filament_change_events: {s['filament_change_events']}")
     if "driver_hot" in rows:
         out.append(f"driver_temp: {s['driver_temp']}")
     # complete_objects isn't a component option: it decides whether the

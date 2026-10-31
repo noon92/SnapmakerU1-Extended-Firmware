@@ -619,6 +619,10 @@ class PushNotifications:
         # Print-by-object: "layer N complete" for each object, or once
         self.first_layer_objects: str = config.get(
             "first_layer_objects", "each")
+        # Which of loaded / unloaded the Filament loaded / unloaded row sends
+        self.filament_change_events = {
+            e.strip() for e in config.get(
+                "filament_change_events", "loaded,unloaded").split(",")}
         self.tz: Optional[datetime.tzinfo] = None
         tz_name = config.get("timezone", "")
         if tz_name:
@@ -1892,7 +1896,9 @@ class PushNotifications:
         if self._exist_seen[ch] == now:
             return      # already reported (e.g. the same change twice)
         self._exist_seen[ch] = now
-        if self._job_active or "filament_change" not in self.rows:
+        if self._job_active or "filament_change" not in self.rows or \
+                ("loaded" if now else "unloaded") \
+                not in self.filament_change_events:
             return      # a print job's runouts and refills say it instead
         # Loaded: the printer's filament info arrives shortly after the
         # sensor; unloaded: what it had (the info may be cleared by now)

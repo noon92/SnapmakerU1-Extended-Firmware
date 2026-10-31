@@ -1361,6 +1361,14 @@ async def test_filament_change():
           == [("🧵 U1 filament unloaded", "Toolhead 3: Elegoo PETG")],
           [(e["title"], e["body"]) for e in log])
     log.clear()
+    c.filament_change_events = {"loaded"}
+    await exist(True, True, True, True)
+    await exist(True, False, True, True)
+    await asyncio.sleep(0.5)
+    check("only the ticked events are sent",
+          [e["title"] for e in log] == ["🧵 U1 filament loaded"],
+          [e["title"] for e in log])
+    log.clear()
     await start_job(server)
     await exist(True, True, True, True)
     await asyncio.sleep(0.5)

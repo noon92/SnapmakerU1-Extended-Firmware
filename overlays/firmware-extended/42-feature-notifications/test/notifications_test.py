@@ -196,6 +196,10 @@ class Config:
     def getfloat(self, key, default=None, **_kw):
         return float(self.values.get(key, default))
 
+    def getboolean(self, key, default=None, **_kw):
+        v = self.values.get(key, default)
+        return v if isinstance(v, bool) else str(v).lower() == "true"
+
     def gettemplate(self, key, default=None, **_kw):
         # Moonraker renders {secrets.<section>.<name>} from its secrets file
         value = str(self.values.get(key, default))
@@ -554,6 +558,64 @@ async def test_filament_alerts():
           "insufficient. Needs ~20 g, 24 g left." in body, body)
     check("spools reported at start aren't also reported as running low",
           not [t for t in titles if "running low" in t], titles)
+    log.clear()
+    # A loaded spool Spoolman shows at 0 g: "amount unknown" at start,
+    # unless that warning is turned off
+    for unknown_on in (True, False):
+        reset_world()
+        log2 = []
+        server2, c2 = make({"spoolman_url": "http://spoolman:7912",
+                            "filament_low_percent": "0",
+                            "filament_low_grams": "0",
+                            "filament_unknown": unknown_on},
+                           {"filament_short": [("ntfy", FakeService(log2, "ntfy"), False)]})
+        META["filament_weight"] = [50.0]
+        STATE["print_task_config"] = {
+            "extruder_map_table": [0], "filament_spool_id": [40],
+            "extruders_used": [True], "auto_replenish_filament": False,
+            "replenish_ignore_color": False, "filament_exist": [True],
+            "filament_vendor": ["X"], "filament_type": ["PLA"],
+            "filament_sub_type": [""], "filament_color_rgba": ["FF0000FF"]}
+        spool(40, 0.0)
+        STATE["print_stats"] = ps("standby")
+        await server2.handlers["server:klippy_ready"]()
+        STATE["print_stats"] = ps("printing")
+        STATE["virtual_sdcard"] = {"file_position": 1000, "progress": 0}
+        await server2.handlers["job_state:state_changed"](
+            JobEvent.STARTED, {}, STATE["print_stats"])
+        await asyncio.sleep(0.4)
+        got = [e["title"] for e in log2]
+        if unknown_on:
+            check("a 0 g spool is reported as amount unknown",
+                  got == ["🧵 U1 filament amount unknown"], got)
+        else:
+            check("...not when that warning is off", got == [], got)
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({"spoolman_url": "http://spoolman:7912",
+                      "filament_low_percent": "10",
+                      "filament_low_grams": "50"},
+                     {"filament_short": [("ntfy", ntfy, False)],
+                      "filament_low": [("ntfy", ntfy, False)]})
+    META["filament_weight"] = [120.0, 20.0]
+    STATE["print_task_config"] = {
+        "extruder_map_table": [0, 1], "filament_spool_id": [10, 20, 30],
+        "extruders_used": [True, True, False],
+        "auto_replenish_filament": True, "replenish_ignore_color": False,
+        "filament_exist": [True, True, True], "filament_vendor": ["X"] * 3,
+        "filament_type": ["PLA"] * 3, "filament_sub_type": [""] * 3,
+        "filament_color_rgba": ["FF0000FF"] * 3}
+    spool(10, 100.0)
+    spool(20, 24.0)
+    spool(30, 300.0)
+    STATE["print_stats"] = ps("standby")
+    await server.handlers["server:klippy_ready"]()
+    STATE["print_stats"] = ps("printing")
+    STATE["virtual_sdcard"] = {"file_position": 1000, "progress": 0}
+    await server.handlers["job_state:state_changed"](
+        JobEvent.STARTED, {}, STATE["print_stats"])
+    await asyncio.sleep(0.4)
     log.clear()
     # Mid-print (half way): toolhead 1 used 50 g and needs 70 more of its
     # 50 g (worse than the orange it was reported as); toolhead 2 is as
@@ -1349,6 +1411,9 @@ async def test_filament_change():
           [(e["title"], e["body"]) for e in log]
           == [("🧵 U1 filament loaded", "Toolhead 2: Sunlu TPU")],
           [(e["title"], e["body"]) for e in log])
+    check("...with a spool picture (no Spoolman: no amount)",
+          log and log[0]["attach"] and log[0]["attach"].endswith(".jpg"),
+          log and log[0]["attach"])
     log.clear()
     await exist(True, True, False, True)
     await exist(True, True, True, True)      # flicker while feeding

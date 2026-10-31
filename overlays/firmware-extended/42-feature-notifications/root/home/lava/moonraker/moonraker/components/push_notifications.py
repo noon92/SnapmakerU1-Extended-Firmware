@@ -643,6 +643,10 @@ class PushNotifications:
             "filament_low_percent", 10., minval=0., maxval=100.)
         self.filament_low_grams: float = config.getfloat(
             "filament_low_grams", 50., minval=0.)
+        # Warn at print start about a loaded spool Spoolman shows at 0 g
+        # ("amount unknown"); off for people who don't track weights
+        self.filament_unknown: bool = config.getboolean(
+            "filament_unknown", True)
         # The option is driver_temp: driver_hot is the row
         self.driver_hot: float = config.getfloat(
             "driver_temp", DRIVER_HOT_DEFAULT, minval=40., maxval=150.)
@@ -1902,13 +1906,26 @@ class PushNotifications:
             return      # a print job's runouts and refills say it instead
         # Loaded: the printer's filament info arrives shortly after the
         # sensor; unloaded: what it had (the info may be cleared by now)
-        name = self._printer_filament(ptc, ch) or self._exist_names.get(ch, "")
+        ids = list(ptc.get("filament_spool_id") or [])
+        sid = ids[ch] if ch < len(ids) else 0
+        spool = await self._spool(sid) if now and self._spoolman_active() \
+            else None
+        remaining = self._remaining(spool)
+        name = self._spool_name(spool) or self._printer_filament(ptc, ch) \
+            or self._exist_names.get(ch, "")
         if name:
             self._exist_names[ch] = name
-        await self._send(
-            "filament_change",
-            self._title("filament_loaded" if now else "filament_unloaded"),
-            f"{self._toolhead(ch)}: {name}" if name else self._toolhead(ch))
+        title = self._title("filament_loaded" if now else "filament_unloaded")
+        body = self._lines(
+            f"{self._toolhead(ch)}: {name}" if name else self._toolhead(ch),
+            f"{remaining:.0f} g left" if remaining is not None
+            and remaining > 0 else "")
+        # The spool picture: its colour from Spoolman or the printer, the
+        # amount only when Spoolman knows it
+        row = dict(toolhead=self._toolhead(ch), word="", status="ink",
+                   needs="", remaining=remaining, full=self._full_weight(spool),
+                   colour=self._spool_colour(spool, ch), name=name)
+        await self._send_parts("filament_change", [(title, body, [row])])
 
     async def _intervention_hold(self, hold: int, what: str) -> None:
         start = time.monotonic()
@@ -2896,6 +2913,8 @@ class PushNotifications:
             spools[ch] = (spool, remaining)
             self._seen(sid, remaining)
             # Spoolman at 0 g (or less) for a loaded spool: amount unknown
+            if remaining <= 0 and not self.filament_unknown:
+                continue
             if need[ch] > 0 and (remaining <= 0 or self._status_of(
                     remaining, need[ch]) != "green"):
                 it = await self._issue(ptc, ch, sid, spool, remaining,

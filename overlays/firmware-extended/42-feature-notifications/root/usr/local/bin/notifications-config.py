@@ -111,7 +111,7 @@ ROWS = [
      "print", False),
     # Filament loaded into or unloaded from a toolhead, outside a print job
     ("filament_change", "Filament loaded / unloaded", "🧵", False, "low",
-     "snapshot", "print", False),
+     "spool", "print", False),
     # Chamber temperature: only when a print job waits on a chamber target
     # (any chamber heater, or Snapmaker's own chamber wait)
     ("chamber_waiting", "Waiting for chamber temperature", "🌡️", True,
@@ -240,6 +240,7 @@ def defaults():
         "complete_objects": "each",
         "filament_low_percent": 10,
         "filament_low_grams": 50,
+        "filament_unknown": True,
         "driver_temp": 105,     # °C, X or Y stepper driver (row: driver_hot)
         "email_enabled": False,
         "webhook_enabled": False,
@@ -408,6 +409,8 @@ def load_from(cfg):
         sec.get("email_enabled", "false").strip().lower() == "true"
     s["webhook_enabled"] = \
         sec.get("webhook_enabled", "false").strip().lower() == "true"
+    s["filament_unknown"] = \
+        sec.get("filament_unknown", "true").strip().lower() == "true"
     for key in STRING_FIELDS + SECRET_FIELDS:
         if key in sec:
             s[key] = sec.get(key).strip()
@@ -476,6 +479,7 @@ def section_lines(s):
         f"complete_objects: {s['complete_objects']}",
         f"filament_low_percent: {s['filament_low_percent']}",
         f"filament_low_grams: {s['filament_low_grams']}",
+        f"filament_unknown: {'true' if s['filament_unknown'] else 'false'}",
         f"driver_temp: {s['driver_temp']}",
         f"spoolman_rev: {SPOOLMAN_REV}",
         f"email_enabled: {'true' if s['email_enabled'] else 'false'}",
@@ -555,6 +559,8 @@ def validate(data, current):
         s["email_enabled"] = bool(data["email_enabled"])
     if "webhook_enabled" in data:
         s["webhook_enabled"] = bool(data["webhook_enabled"])
+    if "filament_unknown" in data:
+        s["filament_unknown"] = bool(data["filament_unknown"])
     for key in STRING_FIELDS:
         if key in data:
             s[key] = str(data[key] or "").strip()
@@ -1062,6 +1068,8 @@ def render_moonraker(s, sec=None):
         out.append(f"spoolman_url: {spoolman_url()}")
         out.append(f"filament_low_percent: {s['filament_low_percent']}")
         out.append(f"filament_low_grams: {s['filament_low_grams']}")
+        out.append(f"filament_unknown: "
+                   f"{'true' if s['filament_unknown'] else 'false'}")
     # Links in the text: email and Telegram have no buttons
     text_links = email or (push and s["provider"] in (
         "gotify", "telegram", "discord", "discord_dm"))

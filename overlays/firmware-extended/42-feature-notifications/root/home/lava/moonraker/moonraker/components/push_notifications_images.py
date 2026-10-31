@@ -260,7 +260,8 @@ def _arrow_elbow(d: ImageDraw.ImageDraw, x0: float, y0: float, x1: float,
 
 def render(rows: List[Dict[str, Any]], path: str) -> str:
     """Draw the rows and save a JPEG at `path`. Each row:
-      toolhead, word, status, needs (str or ""), remaining, full, colour,
+      toolhead, word, status, needs (str or ""), remaining (None: not
+      known, drawn full with no amount line), full, colour,
       name, and optionally refills = [{toolhead, remaining, full, colour,
       name, status, match ("Exact match" / "Inexact match")}, ...] (in the order the printer uses them) or
       note = [lines].
@@ -276,10 +277,12 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
               col: RGB, needs: str = "") -> None:
         _text(d, (cx, y0 + 2), sp["toolhead"], True, 24, col, center=True)
         y = y0 + SPOOL + 66
-        _text(d, (cx, y), "Amount left unknown" if sp.get("unknown")
-              else grams_text(sp["remaining"], sp.get("full")),
-              True, 20, col, center=True)
-        y += 27
+        if sp.get("remaining") is not None:
+            # No Spoolman: no amount, the spool is drawn full
+            _text(d, (cx, y), "Amount left unknown" if sp.get("unknown")
+                  else grams_text(sp["remaining"], sp.get("full")),
+                  True, 20, col, center=True)
+            y += 27
         if needs:
             _text(d, (cx, y), needs.rstrip("."), False, 20, INK, center=True)
             y += 27
@@ -303,6 +306,7 @@ def render(rows: List[Dict[str, Any]], path: str) -> str:
         nonlocal bg
         bg = _put(bg, cx, y + 40, spool(
             UNKNOWN_FILL if sp.get("unknown")
+            else 1. if sp.get("remaining") is None
             else level(sp["remaining"], sp.get("full")),
             sp.get("colour") or (200, 200, 200)))
 

@@ -330,6 +330,10 @@
                 </div>
                 <div class="nt-hint">0 turns this off.</div>
             </div>
+            <div class="nt-field" style="grid-column:1 / -1">
+                <label><input type="checkbox" id="nt-fl-unknown"> At print start, warn about a loaded spool that Spoolman shows at 0 g (amount of filament left unknown)</label>
+                <div class="nt-hint">Turn off if you don't track spool weights in Spoolman.</div>
+            </div>
         </div>
         <div class="nt-hint" id="nt-filament-off" style="margin:-8px 0 16px;font-size:12px;color:var(--muted)">
             🧵 <b>Spoolman</b> notifications (not enough filament, running low) need the Spoolman integration (Settings &gt; Snapmaker Components &gt; Spoolman Integration).
@@ -619,6 +623,7 @@
             el('nt-stored-error').style.display = data.meta.stored_error ? '' : 'none';
             el('nt-fl-percent').value = data.filament_low_percent;
             el('nt-fl-grams').value = data.filament_low_grams;
+            el('nt-fl-unknown').checked = !!data.filament_unknown;
             el('nt-filament').style.display = data.meta.spoolman ? '' : 'none';
             el('nt-filament-off').style.display = data.meta.spoolman ? 'none' : '';
             el('nt-email-host').value = data.email_host;
@@ -809,6 +814,7 @@
                 complete_objects: el('nt-complete-objects').value,
                 filament_low_percent: parseInt(el('nt-fl-percent').value, 10) || 0,
                 filament_low_grams: parseInt(el('nt-fl-grams').value, 10) || 0,
+                filament_unknown: el('nt-fl-unknown').checked,
                 email_enabled: emailEnabled,
                 email_host: el('nt-email-host').value.trim(),
                 email_port: parseInt(el('nt-email-port').value, 10) || 0,

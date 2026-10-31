@@ -1321,6 +1321,52 @@ async def test_console():
         "server not found", "could not connect"])
 
 
+async def test_filament_change():
+    print("Filament loaded / unloaded")
+    reset_world()
+    log = []
+    ntfy = FakeService(log, "ntfy")
+    server, c = make({}, {"filament_change": [("ntfy", ntfy, False)]})
+    sys.modules[type(c).__module__].FILAMENT_CHANGE_SETTLE = 0.2
+    STATE["print_stats"] = ps("standby")
+    STATE["print_task_config"] = {
+        "filament_exist": [True, False, True, True],
+        "filament_vendor": ["Elegoo", "NONE", "Elegoo", "Elegoo"],
+        "filament_type": ["PLA", "NONE", "PETG", "PLA"]}
+    await server.handlers["server:klippy_ready"]()
+    await asyncio.sleep(0.4)
+    check("nothing at start (the state is only seeded)", log == [])
+
+    async def exist(*e):
+        await c._on_status_update(
+            {"print_task_config": {"filament_exist": list(e)}}, 0)
+    await exist(True, True, True, True)
+    await c._on_status_update({"print_task_config": {
+        "filament_vendor": ["Elegoo", "Sunlu", "Elegoo", "Elegoo"],
+        "filament_type": ["PLA", "TPU", "PETG", "PLA"]}}, 0)
+    await asyncio.sleep(0.5)
+    check("loaded, named once the printer knows the filament",
+          [(e["title"], e["body"]) for e in log]
+          == [("🧵 U1 filament loaded", "Toolhead 2: Sunlu TPU")],
+          [(e["title"], e["body"]) for e in log])
+    log.clear()
+    await exist(True, True, False, True)
+    await exist(True, True, True, True)      # flicker while feeding
+    await asyncio.sleep(0.5)
+    check("a change that doesn't hold isn't reported", log == [])
+    await exist(True, True, False, True)
+    await asyncio.sleep(0.5)
+    check("unloaded, named by what it had",
+          [(e["title"], e["body"]) for e in log]
+          == [("🧵 U1 filament unloaded", "Toolhead 3: Elegoo PETG")],
+          [(e["title"], e["body"]) for e in log])
+    log.clear()
+    await start_job(server)
+    await exist(True, True, True, True)
+    await asyncio.sleep(0.5)
+    check("nothing during a print job", log == [])
+
+
 async def test_driver_hot():
     print("Driver temperature: once per print job, again after a pause")
     reset_world()
@@ -1492,7 +1538,7 @@ async def run_component_tests():
     for t in (test_order_and_priority, test_expiry_and_independence,
               test_fault_dedup, test_same_preparation_everywhere,
               test_email_threads, test_filament_measured, test_filament_alerts,
-              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber, test_backup_order, test_console,
+              test_faults_over_a_job, test_spool_switch, test_time_left, test_calibration, test_gotify, test_image_names, test_fault_emoji, test_send_gap, test_macro_notify, test_queue_line, test_chamber, test_filament_change, test_backup_order, test_console,
               test_driver_hot,
               test_print_by_object,
               test_no_secrets_in_logs, test_config_lines):

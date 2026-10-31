@@ -96,6 +96,7 @@ ROW_IDS = (
     "paused", "resumed", "object_complete", "complete", "cancelled",
     "calibration",
     "chamber_waiting", "chamber_reached", "chamber_fault",
+    "filament_change",
     "macro_min", "macro_low", "macro_default", "macro_high", "macro_max",
     "error", "warning", "shutdown", "power_loss", "driver_hot",
     "filament_short", "filament_low", "spool_switch",
@@ -128,6 +129,8 @@ TITLES = {
     "shutdown": "🛑 {name} Error: shutdown",
     "power_loss": "⚡ {name} power loss",
     "driver_hot": "🌡️ {name} driver running hot",
+    "filament_loaded": "🧵 {name} filament loaded",
+    "filament_unloaded": "🧵 {name} filament unloaded",
     "filament_short": "🧵 {name} not enough filament",
     "filament_close": "🧵 {name} filament may be insufficient",
     "filament_unknown": "🧵 {name} filament amount unknown",
@@ -154,6 +157,11 @@ MANUAL_CLEAN = {192: 1, 193: 2, 194: 3, 195: 4}
 # heating a toolhead also runs at action IDLE, for longer than this, but
 # Klipper is "Printing" then, which restarts the count.
 INTERVENTION_HOLD = 15.
+# Filament loaded / unloaded: print_task_config.filament_exist per toolhead
+# (the toolhead's sensor, or the feeder's). It can flicker while filament
+# is fed, so a change is reported once it has held this long. Not during
+# a print job: runouts and refills have their own notifications.
+FILAMENT_CHANGE_SETTLE = 3.
 FAULT_ROWS = ("error", "warning", "shutdown")
 # Chamber temperature, whatever heats the chamber: a print job "waits" when,
 # before its first layer, there is a chamber target and the chamber is below
@@ -223,7 +231,7 @@ THREAD_ROWS = ("started", "layer_started", "first_layer",
                "progress_75", "paused", "resumed", "object_complete",
                "complete", "cancelled",
                "chamber_waiting", "chamber_reached", "chamber_fault",
-               "filament_short", "filament_low", "spool_switch")
+               "filament_change", "filament_short", "filament_low", "spool_switch")
 THREAD_FAULT_WINDOW = 120.
 NAME_CAP_MIN = 8
 PTC_FIELDS = ["extruder_map_table", "filament_spool_id", "extruders_used",
@@ -255,7 +263,7 @@ URGENT_ROWS = ("error", "warning", "shutdown", "power_loss",
                "chamber_fault")
 EXPIRING_ROWS = ("started", "layer_started", "first_layer", "progress_25",
                  "progress_50", "progress_75", "object_complete",
-                 "chamber_waiting", "chamber_reached")
+                 "chamber_waiting", "chamber_reached", "filament_change")
 STATUS_EXPIRY = 300.
 # Spoolman usage counts as tracked once spools lost this much; if nothing
 # was used by this far into the file, it isn't tracked and the filament
@@ -734,6 +742,12 @@ class PushNotifications:
             "idle_timeout": {},
             **{d: {} for d in DRIVERS}, **{e: {} for e in EXTRUDERS}}
         self._cal_busy_at = 0.      # when Klipper was last seen busy
+        # Filament loaded / unloaded: last reported filament_exist per
+        # toolhead (None until seeded at klippy_ready), the filament each
+        # toolhead last had (to name what was unloaded), pending changes
+        self._exist_seen: Optional[List[bool]] = None
+        self._exist_names: Dict[int, str] = {}
+        self._exist_gen = 0
         # Chamber: the printer's heater_generic objects, whether it has
         # Snapmaker's chamber sensor / purifier / a DragonBreath (found at
         # klippy_ready), and this job's chamber state (see _track_chamber)
@@ -1848,6 +1862,48 @@ class PushNotifications:
         self._spawn(self._send(rid, self._title(title),
                                self._lines(filename, *lines)))
 
+    # ---- filament loaded / unloaded ----------------------------------
+
+    def _track_filament_change(self) -> None:
+        ptc = self._status["print_task_config"]
+        exist = [bool(x) for x in (ptc.get("filament_exist") or [])]
+        if not exist:
+            return
+        for ch in range(len(exist)):
+            name = self._printer_filament(ptc, ch)
+            if name:
+                self._exist_names[ch] = name
+        if self._exist_seen is None or len(self._exist_seen) != len(exist):
+            self._exist_seen = exist        # seed: nothing to report yet
+            return
+        for ch, (was, now) in enumerate(zip(self._exist_seen, exist)):
+            if was != now:
+                self._exist_gen += 1
+                self._spawn(self._filament_change(ch, now, self._exist_gen))
+
+    async def _filament_change(self, ch: int, now: bool, gen: int) -> None:
+        await asyncio.sleep(FILAMENT_CHANGE_SETTLE)
+        if gen != self._exist_gen:
+            return      # changed again meanwhile: the newer wait reports
+        ptc = self._status["print_task_config"]
+        exist = [bool(x) for x in (ptc.get("filament_exist") or [])]
+        if ch >= len(exist) or exist[ch] != now or self._exist_seen is None:
+            return
+        if self._exist_seen[ch] == now:
+            return      # already reported (e.g. the same change twice)
+        self._exist_seen[ch] = now
+        if self._job_active or "filament_change" not in self.rows:
+            return      # a print job's runouts and refills say it instead
+        # Loaded: the printer's filament info arrives shortly after the
+        # sensor; unloaded: what it had (the info may be cleared by now)
+        name = self._printer_filament(ptc, ch) or self._exist_names.get(ch, "")
+        if name:
+            self._exist_names[ch] = name
+        await self._send(
+            "filament_change",
+            self._title("filament_loaded" if now else "filament_unloaded"),
+            f"{self._toolhead(ch)}: {name}" if name else self._toolhead(ch))
+
     async def _intervention_hold(self, hold: int, what: str) -> None:
         start = time.monotonic()
         while True:
@@ -1984,6 +2040,9 @@ class PushNotifications:
         for obj in self._status:
             self._status[obj].update(status.get(obj) or {})
         self._calibrating = self._cal_action = None   # Klipper restarted
+        self._exist_seen = None
+        self._exist_gen += 1
+        self._track_filament_change()
         self._cal_hold += 1
         ps = self._status["print_stats"]
         if ps.get("state") in ("printing", "paused"):
@@ -2009,6 +2068,8 @@ class PushNotifications:
             self._cal_busy_at = time.monotonic()
         if "machine_state_manager" in data:
             self._track_calibration()
+        if "filament_exist" in (data.get("print_task_config") or {}):
+            self._track_filament_change()
         if self._job_active and self._ch:
             self._track_chamber()
         if not self._job_active or ps.get("state") != "printing":

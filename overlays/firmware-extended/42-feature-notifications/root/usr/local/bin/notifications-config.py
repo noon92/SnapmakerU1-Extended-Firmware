@@ -109,6 +109,9 @@ ROWS = [
      "print", False),
     ("calibration", "Manual calibrations", "📐", True, "high", "snapshot",
      "print", False),
+    # Filament loaded into or unloaded from a toolhead, outside a print job
+    ("filament_change", "Filament loaded / unloaded", "🧵", True, "low",
+     "snapshot", "print", False),
     # Chamber temperature: only when a print job waits on a chamber target
     # (any chamber heater, or Snapmaker's own chamber wait)
     ("chamber_waiting", "Waiting for chamber temperature", "🌡️", True,

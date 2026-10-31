@@ -1319,6 +1319,34 @@ async def test_backup_order():
         {"nums": 1, "colors": ["FF0000"]}], replenish_ignore_color=False)
     check("exact colour compares the whole multi-colour set",
           B(multi, 0) == [2], B(multi, 0))
+    check("a different sub-type says both, blank as none",
+          c._refill_blockers(dict(ptc, filament_sub_type=["", "Dual Color",
+                                                          "Basic", "Basic"]), 0)
+          == [(1, "different sub-type (Dual Color vs none)"),
+              (2, "different sub-type (Basic vs none)"),
+              (3, "different sub-type (Basic vs none)")],
+          c._refill_blockers(dict(ptc, filament_sub_type=["", "Dual Color",
+                                                          "Basic", "Basic"]), 0))
+    c._status["print_task_config"] = dict(ptc)
+    check("multi-colour: Spoolman's list, else one colour, else the printer's",
+          c._spool_colour({"filament": {"multi_color_hexes": "9C20D9,000000"}}, 0)
+          == [(0x9C, 0x20, 0xD9), (0, 0, 0)]
+          and c._spool_colour({"filament": {"color_hex": "FF0000"}}, 0)
+          == (255, 0, 0)
+          and c._spool_colour(None, 1) == (0x30, 0x30, 0xF0),
+          (c._spool_colour({"filament": {"multi_color_hexes": "9C20D9,000000"}}, 0),
+           c._spool_colour(None, 1)))
+    c._status["print_task_config"] = dict(
+        multi, filament_color_multi=[{"colors": ["9C20D9", "000000"]}] + [{}] * 3)
+    check("...the printer's multi-colour list when there's no spool",
+          c._spool_colour(None, 0) == [(0x9C, 0x20, 0xD9), (0, 0, 0)],
+          c._spool_colour(None, 0))
+    c._status["print_task_config"] = {}
+    im2 = pn.images
+    img = im2.spool(1.0, [(230, 60, 60), (50, 120, 220)])
+    check("a two-colour spool draws both colours",
+          img.getpixel((img.width // 2 - 25, img.height // 2 - 30))[:3] != 
+          img.getpixel((img.width // 2 - 25, img.height // 2 + 30))[:3])
     check("blockers: same material but not refillable, with why",
           c._refill_blockers(dict(ptc, replenish_ignore_color=False,
                                   filament_vendor=["Elegoo", "NONE",

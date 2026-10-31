@@ -2382,16 +2382,35 @@ class PushNotifications:
         return " ".join(x for x in (vendor, fname) if x)
 
     def _spool_colour(self, spool: Optional[Dict[str, Any]],
-                      ch: int) -> Optional[Tuple[int, int, int]]:
+                      ch: int) -> Any:
+        """The filament's colour for the picture: one RGB, or a list of
+        them for a multi-colour filament (Spoolman's multi_color_hexes,
+        else the printer's filament_color_multi), falling back to the
+        single colour (Spoolman's color_hex, the printer's rgba)."""
+        if images is None:
+            return None
         fil = (spool or {}).get("filament") or {}
-        multi = str(fil.get("multi_color_hexes") or "").split(",")
-        for value in (fil.get("color_hex"), multi[0]):
-            rgb = images.parse_hex(value) if images else None
-            if rgb:
-                return rgb
+        multi = [images.parse_hex(v) for v in
+                 str(fil.get("multi_color_hexes") or "").split(",") if v]
+        multi = [c for c in multi if c]
+        if len(multi) > 1:
+            return multi
+        single = images.parse_hex(fil.get("color_hex"))
+        if single:
+            return single
+        if multi:
+            return multi[0]
         ptc = self._job_ptc or self._status["print_task_config"]
+        pm = list(ptc.get("filament_color_multi") or [])
+        if ch < len(pm) and isinstance(pm[ch], dict):
+            cols = [images.parse_hex(v) for v in (pm[ch].get("colors") or [])]
+            cols = [c for c in cols if c]
+            if len(cols) > 1:
+                return cols
+            if cols:
+                return cols[0]
         cols = list(ptc.get("filament_color_rgba") or [])
-        if images and ch < len(cols):
+        if ch < len(cols):
             return images.parse_hex(cols[ch])
         return None
 
@@ -2470,7 +2489,7 @@ class PushNotifications:
         nd, nv = self._nozzle(ch)
         cd, cv = self._nozzle(c)
         if nd is not None and cd is not None and (nd != cd or nv != cv):
-            return False, (f"nozzle {cd} vs {nd}" if nd != cd
+            return False, (f"nozzle {cd} vs {nd} mm" if nd != cd
                            else f"{cv or 'other'} nozzle vs {nv or 'other'}"
                            ) if same_type else ""
         if field(ptc, "filament_vendor", c).upper() in ("", "NONE"):
@@ -2480,8 +2499,9 @@ class PushNotifications:
                         ("filament_type", "type"),
                         ("filament_sub_type", "sub-type")):
             if field(ptc, k, c).lower() != field(src, k, ch).lower():
-                return False, (f"different {what} ({field(ptc, k, c)} vs "
-                               f"{field(src, k, ch)})" if same_type else "")
+                return False, (f"different {what} ({field(ptc, k, c) or 'none'}"
+                               f" vs {field(src, k, ch) or 'none'})"
+                               if same_type else "")
         if not ptc.get("replenish_ignore_color") and \
                 self._colour_multi(ptc, c) != self._colour_multi(src, ch):
             return False, "colour differs (refill needs an exact match)"

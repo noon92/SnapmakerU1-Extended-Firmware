@@ -4,7 +4,8 @@
 
 # Spool pictures for the Spoolman notifications of push_notifications.
 #
-# One row per toolhead: its spool, drawn in the filament's colour and filled
+# One row per toolhead: its spool, drawn in the filament's colour (or
+# colours: wedges and stripes for a multi-colour filament) and filled
 # to how much is left (10% steps of a full spool; under 10% shows a few
 # wraps), with arrows to the spools the printer refills from, in the order
 # it would use them. The toolhead's own spool has the left column to
@@ -106,17 +107,8 @@ def _ellipse(d: ImageDraw.ImageDraw, cx: float, cy: float, rx: float,
     d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], **kw)
 
 
-def spool(fill: float, colour: RGB) -> Image.Image:
-    """An angled spool, front flange on the left, smoked clear plastic."""
-    h = SPOOL * SS
-    r = h / 2.
-    rx = r * SQUASH
-    depth = int(h * DEPTH)
-    w = int(2 * rx) + depth + 4 * SS
-    img = Image.new("RGBA", (w, h + 4 * SS), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    cy = h / 2. + 2 * SS
-    fx = rx + 2 * SS                 # front face centre
+def _shades(colour: RGB) -> Tuple[RGB, RGB, RGB]:
+    """(face, side, groove) shades of a winding colour."""
     lum = sum(colour) / 3.
     face = colour
     side = _scale(colour, 0.78)
@@ -128,23 +120,61 @@ def spool(fill: float, colour: RGB) -> Image.Image:
     elif lum > 225:                  # white: keep shading visible
         side = _scale(colour, 0.84)
         groove = _scale(colour, 0.93)
+    return face, side, groove
+
+
+def spool(fill: float, colour: Any) -> Image.Image:
+    """An angled spool, front flange on the left, smoked clear plastic.
+    `colour` is one RGB, or a list of them for a multi-colour filament:
+    the face is split into wedges and the barrel into stripes, one per
+    colour, in the order given (coextruded or sequential alike)."""
+    colours: List[RGB] = [tuple(c) for c in colour] \
+        if colour and isinstance(colour[0], (tuple, list)) else [tuple(colour)]
+    colours = colours[:8] or [(200, 200, 200)]
+    h = SPOOL * SS
+    r = h / 2.
+    rx = r * SQUASH
+    depth = int(h * DEPTH)
+    w = int(2 * rx) + depth + 4 * SS
+    img = Image.new("RGBA", (w, h + 4 * SS), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    cy = h / 2. + 2 * SS
+    fx = rx + 2 * SS                 # front face centre
     r_fill = math.sqrt(R_HUB ** 2 + fill * (R_FULL ** 2 - R_HUB ** 2)) \
         if fill > 0 else 0.
+    n = len(colours)
+    shades = [_shades(c) for c in colours]
     # back flange
     _ellipse(d, fx + depth, cy, rx, r, fill=(85, 89, 96, 235))
-    # barrel: hub, then windings, stacked from the back
+    # barrel: hub, then windings, stacked from the back; a multi-colour
+    # filament's barrel is striped along its depth
     for i in range(depth, 0, -SS):
         _ellipse(d, fx + i, cy, rx * R_HUB, r * R_HUB, fill=(96, 100, 108))
         if r_fill:
-            _ellipse(d, fx + i, cy, rx * r_fill, r * r_fill, fill=side)
+            k = min(n - 1, int((depth - i) / depth * n))
+            _ellipse(d, fx + i, cy, rx * r_fill, r * r_fill,
+                     fill=shades[k][1])
     if r_fill:
-        _ellipse(d, fx, cy, rx * r_fill, r * r_fill, fill=face)
-        # winding grooves on the front face
-        k = r_fill
+        box = [fx - rx * r_fill, cy - r * r_fill, fx + rx * r_fill,
+               cy + r * r_fill]
+        if n == 1:
+            d.ellipse(box, fill=shades[0][0])
+        else:
+            for k in range(n):
+                d.pieslice(box, -90 + 360. * k / n, -90 + 360. * (k + 1) / n,
+                           fill=shades[k][0])
+        # winding grooves on the front face, in each wedge's own shade
+        kk = r_fill
         step = 0.035
-        while k > R_HUB + step:
-            _ellipse(d, fx, cy, rx * k, r * k, outline=groove, width=SS)
-            k -= step
+        while kk > R_HUB + step:
+            gbox = [fx - rx * kk, cy - r * kk, fx + rx * kk, cy + r * kk]
+            if n == 1:
+                d.ellipse(gbox, outline=shades[0][2], width=SS)
+            else:
+                for k in range(n):
+                    d.arc(gbox, -90 + 360. * k / n, -90 + 360. * (k + 1) / n,
+                          fill=shades[k][2], width=SS)
+            kk -= step
     # hub and centre hole
     _ellipse(d, fx, cy, rx * R_HUB, r * R_HUB, fill=(132, 136, 145))
     _ellipse(d, fx - rx * 0.04, cy - r * 0.04, rx * R_HUB * 0.86,

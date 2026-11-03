@@ -60,9 +60,9 @@ class Moonraker:
             return json.loads(r.read().decode())['result']
 
 def short_name(name):
-    # extruder -> T0, extruder1 -> T1 ...
+    # extruder -> TH1, extruder1 -> TH2 ... (1-based, like the U1 screen)
     m = re.match(r'^extruder(\d*)$', name)
-    return 'T%d' % (int(m.group(1)) if m.group(1) else 0) if m else name
+    return 'TH%d' % ((int(m.group(1)) if m.group(1) else 0) + 1) if m else name
 
 def pins(st):
     return ''.join('T' if st.get(k) else 'F'

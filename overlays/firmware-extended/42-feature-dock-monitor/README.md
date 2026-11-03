@@ -1,8 +1,8 @@
 # Toolhead Dock Monitor
 
 Adds a Klipper extra, `[dock_monitor]`, that watches every toolhead's park
-detector **during a print** and pauses (or emergency-stops) the printer when
-a parked toolhead leaves its dock or the active toolhead leaves the carriage.
+detector **during a print** and pauses the print when a parked toolhead
+leaves its dock or the active toolhead leaves the carriage.
 
 ## Why
 
@@ -33,15 +33,29 @@ Checks are skipped while a tool change is in progress (`activating_move`, or
 `toolhead.get_grab_complete()` false), for `switch_grace_time` (1.5 s) after
 one, while paused or a pause is pending, and when not printing.
 
-`trigger_count` (5) consecutive bad samples trigger the action:
+A mismatch that persists for `trigger_time` (default 7 s) pauses the print.
+It raises a pause-level exception (`id 523`, index = the toolhead, code
+reused from the stock park errors - `42` out of park position, `43`
+detached, `44` conflicting, `20` other, `19` for the active toolhead) with
+the message, e.g.:
 
-- `pause` (default): raises a pause-level exception (`id 523`, index = the
-  toolhead, code reused from the stock park errors - `42` out of park
-  position, `43` detached, `44` conflicting, `20` other, `19` for the active
-  toolhead) so the screen shows it, then runs `PAUSE`. Monitoring re-arms on
-  resume, so resuming without fixing the dock pauses again.
-- `shutdown`: `invoke_shutdown()` - no further motion at all, print is lost.
-  Use this if you do not trust the pause move to clear a dangling toolhead.
+    Toolhead 3 undocked while idle, pausing print!
+    Toolhead 1 lost from carriage while printing, pausing print!
+
+then runs `PAUSE`. The user can resume; monitoring re-arms on resume, so
+resuming without fixing the dock pauses again 7 s later. Pin details
+(park/active/grab) go to the console and klippy.log.
+
+## Sensors
+
+Per toolhead there are three inputs: `park_pin` (dock switch on the
+mainboard: "a toolhead is sitting in this dock"), and two analog Hall
+inputs on the toolhead board, `active_pin` (toolhead is on the carriage)
+and `grab_valid_pin` (carriage grip is engaged), thresholded to booleans
+by the stock `park_detector`. For a parked toolhead only `park_pin` says
+anything positive - the carriage-side sensors read false whether the
+toolhead is in its dock or hanging off it - so there is no useful 2-of-3
+vote and a time threshold is used instead.
 
 Toolheads under the Faulty Toolhead "Bypass MCU" option (`[mcu eN]` serial
 under `/tmp/klipper_host_`) are skipped automatically, since the real
@@ -56,20 +70,27 @@ toolhead may be removed. Others can be skipped with `ignore_extruders`.
 ## Configure
 
 Firmware Config -> Settings -> Print Preferences -> Toolhead Dock Monitor:
-`Disabled` (default), `Pause Print`, or `Emergency Stop`. Options beyond
-`action` can be set in a `[dock_monitor]` section in
-`extended/klipper/*.cfg`:
+`Enabled` / `Disabled` (default). Other options can be set in a
+`[dock_monitor]` section in `extended/klipper/*.cfg`:
 
 ```
 [dock_monitor]
-action: pause            # pause | shutdown
+trigger_time: 7.0
 check_interval: 0.1
-trigger_count: 5
 switch_grace_time: 1.5
 check_active: True
 ignore_extruders:        # e.g. extruder2, extruder3
 ignore_simulated: True
 ```
+
+## Measuring false positives
+
+`tools/dock_logger.py` is a read-only Moonraker poller that logs every
+dock-sensor mismatch with its context (UNEXPECTED / TOOLCHANGE /
+NOT_PRINTING) and duration, to check how noisy the sensors are on a given
+printer before relying on the monitor. Run it on the printer:
+
+    nohup python3 dock_logger.py --verbose >/dev/null 2>&1 &
 
 ## Limitations
 

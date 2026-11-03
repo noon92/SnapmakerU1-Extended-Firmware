@@ -20,14 +20,13 @@
 #   - every parked (inactive) toolhead must read PARKED
 #   - the active toolhead must read ACTIVATE (optional)
 # checked only while print_stats is "printing", outside tool changes, and
-# debounced. On a sustained mismatch it pauses the print (default) or
-# shuts the printer down.
+# debounced. A mismatch lasting trigger_time seconds pauses the print and
+# shows an error on screen; the user can resume.
 #
 # Config:
 #   [dock_monitor]
-#   #action: pause            # pause | shutdown
 #   #check_interval: 0.1      # seconds between samples
-#   #trigger_count: 5         # consecutive bad samples before acting
+#   #trigger_time: 7.0        # seconds a mismatch must persist before pausing
 #   #switch_grace_time: 1.5   # seconds to ignore after a tool change
 #   #check_active: True       # also require the active toolhead to be grabbed
 #   #ignore_extruders:        # comma separated, e.g. extruder2, extruder3
@@ -50,12 +49,9 @@ class DockMonitor:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
-        self.action = config.getchoice('action',
-                                       {'pause': 'pause',
-                                        'shutdown': 'shutdown'}, 'pause')
         self.check_interval = config.getfloat('check_interval', 0.1,
                                               minval=0.02, maxval=2.)
-        self.trigger_count = config.getint('trigger_count', 5, minval=1)
+        self.trigger_time = config.getfloat('trigger_time', 7.0, minval=0.)
         self.switch_grace_time = config.getfloat('switch_grace_time', 1.5,
                                                  minval=0.)
         self.check_active = config.getboolean('check_active', True)
@@ -110,9 +106,9 @@ class DockMonitor:
             and e.name not in self.ignore
             and not (self.ignore_simulated
                      and getattr(e, 'extruder_num', None) in self.simulated)]
-        logging.info("dock_monitor: watching %s (action=%s, %d x %.2fs)",
-                     [e.name for e in self.extruders], self.action,
-                     self.trigger_count, self.check_interval)
+        logging.info("dock_monitor: watching %s (trigger %.1fs, every %.2fs)",
+                     [e.name for e in self.extruders], self.trigger_time,
+                     self.check_interval)
         if self.print_stats is None or len(self.extruders) < 1:
             logging.info("dock_monitor: nothing to watch, disabled")
             return
@@ -167,9 +163,8 @@ class DockMonitor:
                 if ok:
                     self.bad_counts.pop(e.name, None)
                     continue
-                cnt = self.bad_counts.get(e.name, 0) + 1
-                self.bad_counts[e.name] = cnt
-                if cnt >= self.trigger_count:
+                first_bad = self.bad_counts.setdefault(e.name, eventtime)
+                if eventtime - first_bad >= self.trigger_time:
                     self._trip(e, e is active, status)
                     return self.reactor.NEVER
         except Exception:
@@ -179,40 +174,37 @@ class DockMonitor:
     def _trip(self, extruder, is_active, status):
         pins = ''.join(['T' if status.get(k) else 'F' for k in
                         ('park_pin', 'active_pin', 'grab_valid_pin')])
+        num = getattr(extruder, 'extruder_num', 0)
         if is_active:
             code = CODE_ACTIVE_LOST
-            msg = ("Dock monitor: active %s is no longer held by the carriage"
-                   " during print, state: %s [%s]"
-                   % (extruder.name, status['state'], pins))
+            msg = "Toolhead %d lost from carriage while printing, pausing print!" % (num + 1,)
         else:
             code = CODE_PARK_GENERIC
-            what = "left its dock"
             if pins.startswith('FT'):
-                code, what = CODE_PARK_NOT_RETURNED, "is out of its park position"
+                code = CODE_PARK_NOT_RETURNED
             elif pins.startswith('FF'):
-                code, what = CODE_PARK_DETACHED, "detached from its dock"
+                code = CODE_PARK_DETACHED
             elif pins.startswith('TT'):
-                code, what = CODE_PARK_CONFLICT, "reports parked and picked at once"
-            msg = ("Dock monitor: parked %s %s during print (active: %s),"
-                   " state: %s [%s]" % (extruder.name, what,
-                                        self.toolhead.get_extruder().name,
-                                        status['state'], pins))
-        self.tripped = msg
-        logging.error(msg)
+                code = CODE_PARK_CONFLICT
+            msg = "Toolhead %d undocked while idle, pausing print!" % (num + 1,)
+        detail = ("dock_monitor: %s (%s) state %s [park/active/grab=%s] for"
+                  " %.1fs, active toolhead %s" % (
+                      extruder.name, 'active' if is_active else 'parked',
+                      status['state'], pins, self.trigger_time,
+                      self.toolhead.get_extruder().name))
+        self.tripped = msg + " " + detail
+        logging.error(self.tripped)
         self.gcode.respond_raw("!! " + msg)
-        if self.action == 'shutdown':
-            self.printer.invoke_shutdown(msg)
-            return
-        index = getattr(extruder, 'extruder_num', 0)
+        self.gcode.respond_info(detail)
         self.printer.send_event("print_stats:update_exception_info",
-                                523, index, code, msg, 2)
+                                523, num, code, msg, 2)
         if self.pause_resume is not None:
             self.pause_resume.send_pause_command()
         exception_manager = self.printer.lookup_object('exception_manager',
                                                        None)
         if exception_manager is not None:
             exception_manager.raise_exception_async(
-                id=523, index=index, code=code, message=msg,
+                id=523, index=num, code=code, message=msg,
                 oneshot=1, level=2)
         self.reactor.register_callback(self._run_pause)
 
@@ -236,8 +228,8 @@ class DockMonitor:
     cmd_QUERY_DOCK_MONITOR_help = "Report toolhead dock monitor state"
     def cmd_QUERY_DOCK_MONITOR(self, gcmd):
         eventtime = self.reactor.monotonic()
-        lines = ["dock_monitor: %s, action=%s, checking=%s"
-                 % ('enabled' if self.enabled else 'disabled', self.action,
+        lines = ["dock_monitor: %s, trigger=%.1fs, checking=%s"
+                 % ('enabled' if self.enabled else 'disabled', self.trigger_time,
                     self.print_stats is not None
                     and self._should_check(eventtime))]
         active = self.toolhead.get_extruder() if self.toolhead else None
@@ -256,7 +248,7 @@ class DockMonitor:
         gcmd.respond_info('\n'.join(lines))
 
     def get_status(self, eventtime):
-        return {'enabled': self.enabled, 'action': self.action,
+        return {'enabled': self.enabled, 'trigger_time': self.trigger_time,
                 'tripped': self.tripped}
 
 def load_config(config):

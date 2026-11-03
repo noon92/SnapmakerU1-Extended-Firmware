@@ -7,42 +7,22 @@ settings:
     items:
       dock_monitor:
         label: Toolhead Dock Monitor
-        description: Pauses (or stops) a print if a parked toolhead leaves its dock, or the active toolhead leaves the carriage, between tool changes.
+        description: Pauses the print if a parked toolhead leaves its dock, or the active toolhead leaves the carriage, for 7 seconds between tool changes.
         help_url: http://snapmakeru1-extended-firmware.pages.dev/dock_monitor
         get_cmd:
           - bash
           - -c
-          - |
-            if test -e /oem/printer_data/config/extended/klipper/dock_monitor_shutdown.cfg; then
-              echo "shutdown"
-            elif test -e /oem/printer_data/config/extended/klipper/dock_monitor_pause.cfg; then
-              echo "pause"
-            else
-              echo "disabled"
-            fi
+          - test -e /oem/printer_data/config/extended/klipper/dock_monitor.cfg && echo "enabled" || echo "disabled"
         options:
-          pause:
-            label: Pause Print
+          enabled:
+            label: Enabled
             cmd:
               - bash
               - -xc
               - |
                 mkdir -p /oem/printer_data/config/extended/klipper &&
-                rm -f /oem/printer_data/config/extended/klipper/dock_monitor_shutdown.cfg &&
-                ln -sf /usr/local/share/firmware-config/tweaks/klipper/dock_monitor_pause.cfg /oem/printer_data/config/extended/klipper/dock_monitor_pause.cfg &&
-                echo "Dock monitor enabled (pause). Restarting Klipper..." &&
-                /etc/init.d/S60klipper restart
-          shutdown:
-            label: Emergency Stop
-            confirm: "Stop the printer immediately (Klipper shutdown) instead of pausing when a toolhead leaves its dock? This avoids any further carriage movement after a crash, but the print cannot be resumed."
-            cmd:
-              - bash
-              - -xc
-              - |
-                mkdir -p /oem/printer_data/config/extended/klipper &&
-                rm -f /oem/printer_data/config/extended/klipper/dock_monitor_pause.cfg &&
-                ln -sf /usr/local/share/firmware-config/tweaks/klipper/dock_monitor_shutdown.cfg /oem/printer_data/config/extended/klipper/dock_monitor_shutdown.cfg &&
-                echo "Dock monitor enabled (emergency stop). Restarting Klipper..." &&
+                ln -sf /usr/local/share/firmware-config/tweaks/klipper/dock_monitor.cfg /oem/printer_data/config/extended/klipper/dock_monitor.cfg &&
+                echo "Dock monitor enabled. Restarting Klipper..." &&
                 /etc/init.d/S60klipper restart
           disabled:
             label: Disabled
@@ -50,8 +30,7 @@ settings:
               - bash
               - -xc
               - |
-                rm -f /oem/printer_data/config/extended/klipper/dock_monitor_pause.cfg \
-                      /oem/printer_data/config/extended/klipper/dock_monitor_shutdown.cfg &&
+                rm -f /oem/printer_data/config/extended/klipper/dock_monitor.cfg &&
                 echo "Dock monitor disabled. Restarting Klipper..." &&
                 /etc/init.d/S60klipper restart
         default: disabled

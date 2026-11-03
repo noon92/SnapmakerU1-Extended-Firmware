@@ -40,6 +40,8 @@ class GCode:
         self.scripts.append(s)
     def respond_raw(self, m):
         self.raw.append(m)
+    def respond_info(self, m):
+        self.raw.append(m)
 
 class Section:
     def __init__(self, opts):
@@ -165,7 +167,7 @@ class Tests(unittest.TestCase):
         p.reactor.t += 5
         run(p, dm, 10)
         p.extruders[2].state = 'DETACHED'
-        self.assertEqual(run(p, dm, 20), 5)
+        self.assertIn(run(p, dm, 200), (71, 72))
         self.assertEqual(p.objs['pause_resume'].sent, 1)
         exc = p.objs['exception_manager'].raised[0]
         self.assertEqual((exc['id'], exc['index'], exc['code'], exc['level']),
@@ -179,7 +181,7 @@ class Tests(unittest.TestCase):
         p.reactor.t += 5
         for _ in range(10):
             p.extruders[1].state = 'OUTOFPARK'
-            self.assertIsNone(run(p, dm, 4))
+            self.assertIsNone(run(p, dm, 60))
             p.extruders[1].state = 'PARKED'
             self.assertIsNone(run(p, dm, 1))
         self.assertEqual(p.objs['pause_resume'].sent, 0)
@@ -188,26 +190,26 @@ class Tests(unittest.TestCase):
         p, dm = make()
         p.reactor.t += 5
         p.extruders[0].state = 'DETACHED'
-        self.assertEqual(run(p, dm, 20), 5)
+        self.assertIn(run(p, dm, 200), (71, 72))
         self.assertEqual(p.objs['exception_manager'].raised[0]['code'], 19)
 
     def test_active_check_can_be_disabled(self):
         p, dm = make({'check_active': False})
         p.reactor.t += 5
         p.extruders[0].state = 'DETACHED'
-        self.assertIsNone(run(p, dm, 20))
+        self.assertIsNone(run(p, dm, 200))
 
     def test_not_printing_ignored(self):
         p, dm = make()
         p.objs['print_stats'].state = 'standby'
         p.extruders[3].state = 'DETACHED'
-        self.assertIsNone(run(p, dm, 50))
+        self.assertIsNone(run(p, dm, 200))
 
     def test_paused_ignored(self):
         p, dm = make()
         p.objs['pause_resume'].is_paused = True
         p.extruders[3].state = 'DETACHED'
-        self.assertIsNone(run(p, dm, 50))
+        self.assertIsNone(run(p, dm, 200))
 
     def test_tool_change_and_grace(self):
         p, dm = make()
@@ -225,53 +227,61 @@ class Tests(unittest.TestCase):
         p.handlers['extruder:activate_extruder']()
         self.assertIsNone(run(p, dm, 14))   # 1.4 s < 1.5 s grace
         p.extruders[0].state = 'PARKED'
-        self.assertIsNone(run(p, dm, 50))
+        self.assertIsNone(run(p, dm, 200))
 
     def test_grab_incomplete_ignored(self):
         p, dm = make()
         p.reactor.t += 5
         p.objs['toolhead'].grab = False
         p.extruders[0].state = 'PARKED'   # all parked (ACTION=PARK)
-        self.assertIsNone(run(p, dm, 50))
+        self.assertIsNone(run(p, dm, 200))
 
     def test_ignore_list(self):
         p, dm = make({'ignore_extruders': 'extruder2, extruder3'})
         p.reactor.t += 5
         p.extruders[2].state = 'DETACHED'
         p.extruders[3].state = 'DETACHED'
-        self.assertIsNone(run(p, dm, 50))
+        self.assertIsNone(run(p, dm, 200))
 
     def test_simulated_mcu_ignored(self):
         p, dm = make(sections={'mcu e1': {'serial': '/tmp/klipper_host_e1'},
                                'mcu e2': {'serial': '/dev/serial/by-id/x'}})
         p.reactor.t += 5
         p.extruders[1].state = 'DETACHED'
-        self.assertIsNone(run(p, dm, 50))
+        self.assertIsNone(run(p, dm, 200))
         p.extruders[2].state = 'DETACHED'
-        self.assertEqual(run(p, dm, 20), 5)
+        self.assertIn(run(p, dm, 200), (71, 72))
 
-    def test_shutdown_action(self):
-        p, dm = make({'action': 'shutdown'})
-        p.reactor.t += 5
+    def test_message_text(self):
+        p, dm = make()
+        p.reactor.t += 10
+        p.extruders[2].state = 'DETACHED'
+        run(p, dm, 200)
+        self.assertEqual(p.objs['exception_manager'].raised[0]['message'],
+                         'Toolhead 3 undocked while idle, pausing print!')
+        self.assertIn('!! Toolhead 3 undocked while idle, pausing print!',
+                      p.gcode.raw)
+
+    def test_custom_trigger_time(self):
+        p, dm = make({'trigger_time': 0.5})
+        p.reactor.t += 10
         p.extruders[3].state = 'DETACHED'
-        self.assertEqual(run(p, dm, 20), 5)
-        self.assertIn('extruder3', p.shutdown)
-        self.assertEqual(p.objs['pause_resume'].sent, 0)
+        self.assertIn(run(p, dm, 20), (6, 7))
 
     def test_rearms_after_pause_and_resume(self):
         p, dm = make()
         p.reactor.t += 5
         p.extruders[2].state = 'DETACHED'
-        self.assertEqual(run(p, dm, 20), 5)
+        self.assertIn(run(p, dm, 200), (71, 72))
         for cb in p.reactor.callbacks:
             cb(p.reactor.t)
         self.assertNotEqual(p.reactor.timers[dm._check], NEVER)
         pr = p.objs['pause_resume']
         pr.is_paused = True
-        self.assertIsNone(run(p, dm, 20))
+        self.assertIsNone(run(p, dm, 200))
         # user resumes without fixing it -> pauses again
         pr.is_paused, pr.pause_command_sent = False, False
-        self.assertEqual(run(p, dm, 20), 5)
+        self.assertIn(run(p, dm, 200), (71, 72))
 
     def test_disable_command(self):
         p, dm = make()
@@ -281,7 +291,7 @@ class Tests(unittest.TestCase):
             def respond_info(self, m): pass
         p.gcode.commands['SET_DOCK_MONITOR'](G())
         p.extruders[2].state = 'DETACHED'
-        self.assertIsNone(run(p, dm, 50))
+        self.assertIsNone(run(p, dm, 200))
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

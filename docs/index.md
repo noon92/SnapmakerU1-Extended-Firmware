@@ -67,6 +67,7 @@ Heavily expanded firmware with extensive features and customization:
 - [Panda Breath Chamber Heater](panda_breath.md) - BIQU Panda Breath 300 W chamber heater and air filter integration via Klipper `heater_generic`
 - [Filament Feeders](filament_feeders.md) - Feeder setup selection, including longer filament preload for the [BIQU PopStation mini](filament_feeders.md#biqu-popstation-mini) without hand-editing `filament_feed.py` or `printer.cfg`
 - [Faulty Toolhead Bypass](faulty_toolhead.md) - Temporary bypass for one failed toolhead thermistor so the other toolheads can still be used
+- [Toolhead Dock Monitor](dock_monitor.md) - Pause or stop a print when a parked toolhead is knocked off its dock between tool changes
 - [RFID Filament Tag Support](design/rfid.md) - NTAG213/215/216 support for [OpenSpool format](design/openspool.md)
 - [Alternative Filament Detection](design/rfid.md#enabling-openrfid) - Alternative detection implementations with extended spool/tag support from Bambu, Creality, Anycubic, and others
 - [Spoolman Integration](spoolman.md) - Automatic filament metadata sync and spool tracking via Spoolman, resolving spools by ID or RFID card UID, with [community companion apps](spoolman.md#apps) for tagging and linking spools

@@ -15,11 +15,14 @@ set -eo pipefail
 # pip pulls in its dependencies (Apprise, requests, Pillow) that the image
 # doesn't have yet at this step.
 # The sha256 is PyPI's for the wheel: pip refuses any other file.
-PUSHRAKER_VERSION=0.3.3
-PUSHRAKER_SHA256=3afd27342d46405e24c9bd56f0d637de57fe90741220f0620d9a3debe5e66e2b
+# TEST BUILD: an unpublished wheel from the branch, in ../wheel (not PyPI)
+PUSHRAKER_WHEEL=pushraker-0.4.0rc1+test1-py3-none-any.whl
+PUSHRAKER_SHA256=74de9ae19f6fa26d6d98f7553470c74bada1d9ed5d4a2085a497f1aeb7186d3e
 
-echo ">> Installing pushraker $PUSHRAKER_VERSION via pip3"
-cache_pip.sh "$ROOTFS_DIR" "pushraker==$PUSHRAKER_VERSION" --hash=sha256:$PUSHRAKER_SHA256
+echo ">> Installing pushraker $PUSHRAKER_WHEEL (test wheel) via pip3"
+cp "$(dirname "${BASH_SOURCE[0]}")/../wheel/$PUSHRAKER_WHEEL" "$ROOTFS_DIR/tmp/$PUSHRAKER_WHEEL"
+cache_pip.sh "$ROOTFS_DIR" "pushraker @ file:///tmp/$PUSHRAKER_WHEEL" --hash=sha256:$PUSHRAKER_SHA256
+rm -f "$ROOTFS_DIR/tmp/$PUSHRAKER_WHEEL"
 
 # The Klipper macros and the settings page come from the package: link them
 # where the extended config and nginx expect them. find_spec locates the

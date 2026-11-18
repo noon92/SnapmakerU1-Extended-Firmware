@@ -16,8 +16,8 @@ set -eo pipefail
 # doesn't have yet at this step.
 # The sha256 is PyPI's for the wheel: pip refuses any other file.
 # TEST BUILD: an unpublished wheel from the branch, in ../wheel (not PyPI)
-PUSHRAKER_WHEEL=pushraker-0.3.6+test2-py3-none-any.whl
-PUSHRAKER_SHA256=c85e9a4560410ca92796c1a57197c1f9b4d99ffa0e69b9bc68499946fb28b0b0
+PUSHRAKER_WHEEL=pushraker-0.3.6+test3-py3-none-any.whl
+PUSHRAKER_SHA256=1430116ce07b1c297c9522e4c541cc26034292b3e52f75771803369d25000cfb
 
 echo ">> Installing pushraker $PUSHRAKER_WHEEL (test wheel) via pip3"
 cp "$(dirname "${BASH_SOURCE[0]}")/../wheel/$PUSHRAKER_WHEEL" "$ROOTFS_DIR/tmp/$PUSHRAKER_WHEEL"
